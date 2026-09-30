@@ -1,0 +1,32 @@
+[package]
+name = "mixel"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Z-Image-Turbo text-to-image on Apple Silicon with mlx-rs"
+
+[[bin]]
+name = "mixel"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.2.4", features = ["derive"] }
+hf-hub = "0.5.0"
+image = { version = "0.25.2", default-features = false, features = ["png", "jpeg"] }
+mlx-rs = "0.32.0"
+rand = "0.9"
+rand_distr = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.99"
+tokenizers = { version = "0.22.0", default-features = false, features = ["onig"] }
+
+[dev-dependencies]
+tempfile = "3"
+# Only for examples/parity.rs, which compares this port against candle.
+candle-core = { version = "0.11.0", features = ["metal"] }
+candle-nn = { version = "0.11.0", features = ["metal"] }
+candle-transformers = { version = "0.11.0", features = ["metal"] }
+
+[profile.release]
+debug = false
