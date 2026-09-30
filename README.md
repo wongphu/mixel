@@ -14,7 +14,9 @@ Times are for an M3 Max with the weights already in memory; an edit with a ~1024
 reference image takes ~8 min (40 steps) or ~55 s (4 steps). Both are ports: Z-Image of
 candle-transformers' `z_image` (`src/zimage/`), Qwen-Image-2.1 of the diffusers pipeline and
 transformers' Qwen3-VL (`src/qwen21/`). The CLI, JSONL batch mode and seeding match
-[`candy`](https://github.com/wongphu/candle-diffusion), the candle version.
+[`candy`](https://github.com/wongphu/candle-diffusion), the candle version, but Z-Image
+sampling follows diffusers, so the same seed gives a slightly different image
+([details](#z-image-sampling-follows-diffusers)).
 
 ```bash
 cargo install --path .
@@ -166,10 +168,28 @@ convolutions (see [mlx-vs-candle](https://github.com/wongphu/mlx-vs-candle)).
 
 **Output parity.** `cargo run --release --example parity -- 128` runs each stage of both
 implementations on identical inputs. Relative L2 error at 1024×1024: text encoder 0.9%,
-transformer (one step) 1.7%, VAE decode 2.5%, VAE encode 1.5% (at 512×512), which is bf16
-rounding noise. Final images use the
-same seeded noise and match closely at 512×512 (PSNR 32.5 dB); at 1024×1024 the small
-per-step differences compound, so the composition matches but fine details can differ.
+transformer (one step, 32-token caption) 1.4%, VAE decode 2.5%, VAE encode 1.5% (at
+512×512), which is bf16 rounding noise.
+
+### Z-Image sampling follows diffusers
+
+candle's port leaves out two things the reference implementation (diffusers'
+`ZImagePipeline`) does, and mixel follows the reference:
+
+- **The schedule.** The sigmas are `linspace(1, 1/n, n)` shifted by `3s / (1 + 2s)`
+  (1.0, 0.96, 0.91 … 0.27 for 9 steps), so more steps are spent at high noise; candle
+  doesn't shift them (1.0, 0.89, 0.78 … 0.11).
+- **Pad tokens.** The caption and the image are padded to a multiple of 32 tokens with the
+  model's learned `cap_pad_token` / `x_pad_token`, which the image attends to, and the
+  image's RoPE position comes after the padded caption.
+
+The time input and the latents also stay in f32 between steps, as in diffusers.
+`scripts/make_zimage_reference.py` records diffusers' sampling at 512×512, and
+`cargo run --release --example zimage_diffusers_parity -- <dir>` checks mixel against it:
+schedule and time inputs identical, each step within 1–3%, and the final image 6.5% off
+(bf16 noise compounding over 9 steps; the images look the same). Without the pad tokens,
+each step was 3–21% off and the final image 34%. The candle check above uses a 32-token
+caption, where neither implementation pads.
 
 ## Qwen-Image-2.1: accuracy and speed
 
@@ -214,6 +234,8 @@ cargo test --release                  # unit + CLI tests, no model needed
 cargo test --release -- --ignored     # end-to-end generation with the real models
 
 # Parity with the PyTorch reference (needs torch and diffusers >= 0.41; see the scripts)
+python scripts/make_zimage_reference.py
+cargo run --release --example zimage_diffusers_parity -- .
 python scripts/make_qwen21_reference.py <qwen-snapshot-dir> fox.png
 cargo run --release --example qwen21_parity -- . fox.png
 python scripts/make_qwen21_fast_reference.py <qwen-snapshot-dir> fox.png

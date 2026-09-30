@@ -25,6 +25,9 @@ pub const MAX_SIDE: usize = AXES_LENS[1] * 16;
 const FREQ_EMBED_SIZE: usize = 256;
 const MAX_PERIOD: f64 = 10000.0;
 const PATCH: i32 = 2;
+/// Like diffusers, the image and caption sequences are each padded to a
+/// multiple of this with a learned pad token, which attention sees.
+const SEQ_MULTI_OF: usize = 32;
 
 pub struct Transformer {
     w: Weights,
@@ -77,7 +80,9 @@ impl Transformer {
     pub fn forward(&self, x: &Array, t: f32, cap: &Array) -> Result<Array> {
         let (b, c, h, w) = (x.shape()[0], x.shape()[1], x.shape()[2], x.shape()[3]);
         let (ht, wt) = (h / PATCH, w / PATCH);
-        let text_len = cap.shape()[1] as usize;
+        let pad_to = |n: usize| n.div_ceil(SEQ_MULTI_OF) * SEQ_MULTI_OF;
+        let img_len = (ht * wt) as usize;
+        let cap_len = pad_to(cap.shape()[1] as usize);
 
         let adaln = self.t_embed(t)?; // (B, 256)
 
@@ -86,22 +91,26 @@ impl Transformer {
             .reshape(&[b, c, ht, PATCH, wt, PATCH])?
             .transpose_axes(&[0, 2, 4, 3, 5, 1])?
             .reshape(&[b, ht * wt, PATCH * PATCH * c])?;
-        let mut x = linear(&x, &self.w, "all_x_embedder.2-1")?;
-        let img_len = x.shape()[1];
+        let x = linear(&x, &self.w, "all_x_embedder.2-1")?;
+        let mut x = self.pad(&x, "x_pad_token", pad_to(img_len) - img_len)?;
 
-        // Position ids: image tokens sit after the caption on the frame axis.
+        // Position ids: caption tokens (pad included) count up from 1; image
+        // tokens sit after the padded caption on the frame axis; image pad
+        // tokens are at 0.
         let x_ids: Vec<[usize; 3]> = (0..ht as usize)
-            .flat_map(|hi| (0..wt as usize).map(move |wi| [text_len + 1, hi, wi]))
+            .flat_map(|hi| (0..wt as usize).map(move |wi| [cap_len + 1, hi, wi]))
+            .chain(std::iter::repeat_n([0; 3], pad_to(img_len) - img_len))
             .collect();
-        let cap_ids: Vec<[usize; 3]> = (0..text_len).map(|i| [1 + i, 0, 0]).collect();
+        let cap_ids: Vec<[usize; 3]> = (0..cap_len).map(|i| [1 + i, 0, 0]).collect();
         let x_rope = self.rope(&x_ids)?;
         let cap_rope = self.rope(&cap_ids)?;
 
-        let mut cap = linear(
+        let cap = linear(
             &rms_norm(cap, &self.w, "cap_embedder.0", NORM_EPS)?,
             &self.w,
             "cap_embedder.1",
         )?;
+        let mut cap = self.pad(&cap, "cap_pad_token", cap_len - cap.shape()[1] as usize)?;
 
         for i in 0..N_REFINER_LAYERS {
             x = self.block(&format!("noise_refiner.{i}"), &x, &x_rope, Some(&adaln))?;
@@ -119,8 +128,8 @@ impl Transformer {
             u = self.block(&format!("layers.{i}"), &u, &u_rope, Some(&adaln))?;
         }
 
-        // Final layer on the image tokens only.
-        let x = split_at_indices(&u, &[img_len], 1)?.swap_remove(0);
+        // Final layer on the image tokens only (not their padding).
+        let x = split_at_indices(&u, &[img_len as i32], 1)?.swap_remove(0);
         let scale = linear(
             &silu(&adaln)?,
             &self.w,
@@ -139,12 +148,24 @@ impl Transformer {
             .reshape(&[b, c, h, w])?)
     }
 
+    /// Appends `n` copies of the learned pad token `name` (1, DIM) to the
+    /// sequence (B, S, DIM).
+    fn pad(&self, x: &Array, name: &str, n: usize) -> Result<Array> {
+        if n == 0 {
+            return Ok(x.clone());
+        }
+        let token = self.w.get(name)?.reshape(&[1, 1, DIM])?;
+        let token = mlx_rs::ops::broadcast_to(&token, &[x.shape()[0], n as i32, DIM])?;
+        Ok(concatenate(&[x, &token], 1)?)
+    }
+
     /// Sinusoidal timestep embedding + MLP -> (1, 256).
     fn t_embed(&self, t: f32) -> Result<Array> {
-        // Like candle, t and t * 1000 are computed in the model dtype.
-        let t = scalar(t, self.dtype)?
-            .multiply(scalar(T_SCALE, self.dtype)?)?
-            .as_dtype(Dtype::Float32)?;
+        // Like diffusers, t * 1000 and the sinusoids are computed in f32, then
+        // the embedding is cast to the model dtype. (candle rounds t and
+        // t * 1000 to bf16: off by up to ~4, a few radians for the fastest
+        // sinusoids.)
+        let t = Array::from_f32(t).multiply(Array::from_f32(T_SCALE))?;
         let half = FREQ_EMBED_SIZE / 2;
         let freqs: Vec<f32> = (0..half)
             .map(|i| (i as f64 * (-MAX_PERIOD.ln() / half as f64)).exp() as f32)

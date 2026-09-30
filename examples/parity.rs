@@ -6,6 +6,12 @@
 //! ```bash
 //! cargo run --release --example parity -- [latent_size]   # default 128 (1024x1024)
 //! ```
+//!
+//! mixel pads the caption and image sequences to a multiple of 32 with learned
+//! pad tokens, like diffusers, and candle doesn't; so the transformer check
+//! uses a 32-token caption, where neither pads (`latent_size` must be a
+//! multiple of 16). `examples/zimage_diffusers_parity.rs` checks the full
+//! sampling loop against diffusers.
 
 use anyhow::{Error as E, Result};
 use candle_core::{DType, Device, Module, Tensor};
@@ -68,9 +74,12 @@ fn main() -> Result<()> {
         te.forward(&Tensor::new(ids.as_slice(), &dev)?.unsqueeze(0)?)?
     };
     rel_err("text encoder", &m_to_vec(&m_cap)?, &c_to_vec(&c_cap)?);
-    // Feed the same caption features (mlx's) into both transformers.
+    // Feed the same caption features (mlx's) into both transformers, repeated
+    // and cut to exactly 32 tokens so that neither pads (see the module docs).
+    let tiled = mlx_rs::ops::concatenate(&vec![&m_cap; 32usize.div_ceil(ids.len())], 1)?;
+    let m_cap = mlx_rs::ops::split_at_indices(&tiled, &[32], 1)?.swap_remove(0);
     let cap_v = m_to_vec(&m_cap)?;
-    let c_cap = Tensor::from_vec(cap_v, c_cap.dims(), &dev)?.to_dtype(DType::BF16)?;
+    let c_cap = Tensor::from_vec(cap_v, (1, 32, c_cap.dims()[2]), &dev)?.to_dtype(DType::BF16)?;
 
     // ---- transformer, one forward pass at t = 0.5 on seeded noise
     let shape = [1usize, 16, latent, latent];
@@ -103,7 +112,7 @@ fn main() -> Result<()> {
             .to_dtype(DType::BF16)?
             .unsqueeze(2)?;
         let t = Tensor::new(&[0.5f32], &dev)?.to_dtype(DType::BF16)?;
-        let mask = Tensor::ones((1, ids.len()), DType::U8, &dev)?;
+        let mask = Tensor::ones((1, 32), DType::U8, &dev)?;
         c_to_vec(&tr.forward(&x, &t, &c_cap, &mask)?.squeeze(2)?)?
     };
     rel_err("transformer (1 step)", &m_out, &c_out);

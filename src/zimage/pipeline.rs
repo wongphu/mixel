@@ -63,7 +63,6 @@ impl ZImagePipeline {
         on_progress: &mut dyn FnMut(Progress),
     ) -> Result<Generated> {
         let dtype = self.dtype;
-        let scalar = |v: f64| scalar(v as f32, dtype);
 
         let started = Instant::now();
         let cap_feats = self.encode_prompt(&opts.prompt, on_progress)?;
@@ -78,54 +77,64 @@ impl ZImagePipeline {
         let noise = Array::from_slice(&seeded_noise(opts.seed, shape), &shape.map(|d| d as i32));
         let encoded = Instant::now();
 
+        // Like diffusers, the latents stay in f32 and the model reads bf16.
         let mut scheduler = Scheduler::new(opts.num_steps);
         let (mut latents, steps) = match &opts.init_image {
-            None => (noise.as_dtype(dtype)?, opts.num_steps),
+            None => (noise, opts.num_steps),
             Some(img) => {
                 let steps = scheduler.skip_for_strength(opts.strength);
                 let init = self.encode_image(img, opts.width, opts.height)?;
                 // Flow matching: x_sigma = sigma * noise + (1 - sigma) * x_0.
                 // At strength 1, sigma is exactly 1 and this is plain noise.
-                let sigma = scheduler.current_sigma() as f32;
+                let sigma = scheduler.current_sigma();
                 let x = noise.multiply(Array::from_f32(sigma))?.add(
                     init.as_dtype(Dtype::Float32)?
                         .multiply(Array::from_f32(1.0 - sigma))?,
                 )?;
-                (x.as_dtype(dtype)?, steps)
+                (x, steps)
             }
         };
         let image_encoded = Instant::now();
 
         for step in 0..steps {
             let t = scheduler.current_timestep_normalized();
-            let mut pred = self.transformer.forward(&latents, t as f32, &cap_feats)?;
+            let x = latents.as_dtype(dtype)?;
+            let mut pred = self
+                .transformer
+                .forward(&x, t, &cap_feats)?
+                .as_dtype(Dtype::Float32)?;
             if let Some(neg) = &neg_cap_feats {
                 // CFG: pred = neg + scale * (pos - neg)
-                let neg_pred = self.transformer.forward(&latents, t as f32, neg)?;
+                let neg_pred = self
+                    .transformer
+                    .forward(&x, t, neg)?
+                    .as_dtype(Dtype::Float32)?;
                 pred = neg_pred.add(
                     pred.subtract(&neg_pred)?
-                        .multiply(scalar(opts.guidance_scale)?)?,
+                        .multiply(Array::from_f32(opts.guidance_scale as f32))?,
                 )?;
             }
             // Z-Image predicts the negated velocity; Euler step: x + dt * v.
             let dt = scheduler.step_dt();
-            latents = latents.add(pred.negative()?.multiply(scalar(dt)?)?)?;
+            latents = latents.add(pred.negative()?.multiply(Array::from_f32(dt))?)?;
             latents.eval()?;
             on_progress(Progress::Step {
                 step: step + 1,
                 total: steps,
-                t,
-                sigma: scheduler.current_sigma(),
+                t: t as f64,
+                sigma: scheduler.current_sigma() as f64,
             });
         }
 
         let denoised = Instant::now();
         on_progress(Progress::Decoding);
-        let image = self.vae.decode(&latents.transpose_axes(&[0, 2, 3, 1])?)?;
+        let image = self
+            .vae
+            .decode(&latents.as_dtype(dtype)?.transpose_axes(&[0, 2, 3, 1])?)?;
         // [-1, 1] -> [0, 255], computed in the model dtype like candle.
         let image = mlx_rs::ops::clip(&image, (-1.0f32, 1.0f32))?
-            .add(scalar(1.0)?)?
-            .multiply(scalar(127.5)?)?
+            .add(scalar(1.0, dtype)?)?
+            .multiply(scalar(127.5, dtype)?)?
             .as_dtype(Dtype::Uint8)?;
         let image = to_rgb_image(&image)?;
 
