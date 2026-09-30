@@ -128,8 +128,9 @@ pub struct GenerateOptions {
     pub strength: f64,
     /// Images the result should be based on (editing), for models that
     /// support it (Qwen-Image-2.1). Each is resized to about 1024x1024 px at
-    /// its own aspect ratio.
-    pub reference_images: Vec<image::RgbImage>,
+    /// its own aspect ratio. Like the reference pipeline, the VAE sees the
+    /// alpha channel and the vision encoder a copy composited over white.
+    pub reference_images: Vec<image::RgbaImage>,
 }
 
 impl std::fmt::Debug for GenerateOptions {
@@ -185,10 +186,12 @@ impl GenerateOptions {
     /// fewer for img2img with `strength < 1`.
     pub fn steps_to_run(&self) -> usize {
         match self.init_image {
-            Some(_) => {
-                self.num_steps
-                    - crate::zimage::scheduler::start_index(self.num_steps, self.strength)
-            }
+            Some(_) => self
+                .num_steps
+                .saturating_sub(crate::zimage::scheduler::start_index(
+                    self.num_steps,
+                    self.strength,
+                )),
             None => self.num_steps,
         }
     }
@@ -225,14 +228,31 @@ impl GenerateOptions {
             ),
         }
         if !self.height.is_multiple_of(a) || !self.width.is_multiple_of(a) {
+            // Round only the sides that need it, and never down to 0.
+            let down = |x: usize| (x / a * a).max(a);
+            let up = |x: usize| x.div_ceil(a) * a;
+            let (lo, hi) = (
+                (down(self.width), down(self.height)),
+                (up(self.width), up(self.height)),
+            );
+            let suggestion = if lo == hi {
+                format!("{}x{}", lo.0, lo.1)
+            } else {
+                format!("{}x{} or {}x{}", lo.0, lo.1, hi.0, hi.1)
+            };
             anyhow::bail!(
-                "Image dimensions must be divisible by {a}. Got {}x{}. Try {}x{} or {}x{} instead.",
+                "Image dimensions must be divisible by {a}. Got {}x{}. Try {suggestion} instead.",
                 self.width,
                 self.height,
-                (self.width / a) * a,
-                (self.height / a) * a,
-                ((self.width / a) + 1) * a,
-                ((self.height / a) + 1) * a
+            );
+        }
+        if model == Model::ZImageTurbo {
+            let max = crate::zimage::transformer::MAX_SIDE;
+            anyhow::ensure!(
+                self.width <= max && self.height <= max,
+                "{model} supports at most {max}x{max}, got {}x{}",
+                self.width,
+                self.height
             );
         }
         Ok(())
@@ -267,7 +287,8 @@ pub struct Timings {
 
 /// A generated image and how long it took.
 pub struct Generated {
-    pub image: image::RgbImage,
+    /// RGB, or RGBA when Qwen-Image-2.1's output has any transparency.
+    pub image: image::DynamicImage,
     pub timings: Timings,
 }
 
@@ -323,10 +344,16 @@ impl Pipeline {
         mut on_progress: impl FnMut(Progress),
     ) -> Result<Generated> {
         opts.validate(self.model)?;
-        match &self.inner {
+        let result = match &self.inner {
             Inner::ZImage(p) => p.generate_with(opts, &mut on_progress),
             Inner::Qwen(p) => p.generate_with(opts, &mut on_progress),
-        }
+        };
+        // MLX keeps freed buffers for reuse. Between images (often of different
+        // sizes) they only pile up: in a mixed-size batch the cache grew to
+        // ~75 GB and steps slowed ~1.5x under memory pressure. Clear it after
+        // failures too, so they don't slow down the next image.
+        mlx_rs::memory::clear_cache()?;
+        result
     }
 }
 
@@ -350,6 +377,16 @@ pub(crate) fn resize_to_fill(img: &image::RgbImage, w: u32, h: u32) -> image::Rg
     image::DynamicImage::ImageRgb8(img.clone())
         .resize_to_fill(w, h, image::imageops::FilterType::Lanczos3)
         .to_rgb8()
+}
+
+/// Composites an RGBA image over white, as the vision encoder was trained on.
+pub fn composite_over_white(img: &image::RgbaImage) -> image::RgbImage {
+    image::RgbImage::from_fn(img.width(), img.height(), |x, y| {
+        let p = img.get_pixel(x, y).0;
+        let a = p[3] as f32 / 255.0;
+        let mix = |c: u8| (c as f32 * a + 255.0 * (1.0 - a)).round() as u8;
+        image::Rgb([mix(p[0]), mix(p[1]), mix(p[2])])
+    })
 }
 
 /// (1, H, W, 3) u8 array -> RgbImage.
@@ -392,7 +429,47 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("divisible by 16"), "{err}");
-        assert!(err.contains("992x1024"), "{err}");
+        // Only the side that needs it is rounded.
+        assert!(err.contains("Try 992x1024 or 1008x1024 instead"), "{err}");
+
+        // Never suggests 0.
+        let err = opts(8, 1024)
+            .validate(Model::ZImageTurbo)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Try 16x1024 instead"), "{err}");
+    }
+
+    #[test]
+    fn validate_limits_z_image_size_to_its_rope_tables() {
+        opts(8192, 16).validate(Model::ZImageTurbo).unwrap();
+        let err = opts(8208, 16)
+            .validate(Model::ZImageTurbo)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("at most 8192x8192"), "{err}");
+        opts(8224, 32).validate(Model::QwenImage21).unwrap();
+    }
+
+    #[test]
+    fn steps_to_run_never_underflows() {
+        let mut o = opts(512, 512);
+        o.init_image = Some(image::RgbImage::new(1, 1));
+        o.strength = -0.5;
+        assert_eq!(o.steps_to_run(), 0);
+        o.strength = 0.6;
+        assert_eq!(o.steps_to_run(), 6);
+    }
+
+    #[test]
+    fn composite_over_white_blends_by_alpha() {
+        let mut img = image::RgbaImage::from_pixel(3, 1, image::Rgba([0, 0, 0, 0]));
+        img.put_pixel(1, 0, image::Rgba([10, 20, 30, 255]));
+        img.put_pixel(2, 0, image::Rgba([0, 0, 0, 128]));
+        let rgb = composite_over_white(&img);
+        assert_eq!(rgb.get_pixel(0, 0).0, [255, 255, 255]);
+        assert_eq!(rgb.get_pixel(1, 0).0, [10, 20, 30]);
+        assert_eq!(rgb.get_pixel(2, 0).0, [127, 127, 127]);
     }
 
     #[test]
@@ -482,7 +559,7 @@ mod tests {
             .contains("divisible by 32"));
         // Reference images only for models that support them.
         let mut o = opts(1024, 1024);
-        o.reference_images.push(image::RgbImage::new(64, 64));
+        o.reference_images.push(image::RgbaImage::new(64, 64));
         o.validate(Model::QwenImage21).unwrap();
         let err = o.validate(Model::ZImageTurbo).unwrap_err().to_string();
         assert!(err.contains("does not take reference images"), "{err}");

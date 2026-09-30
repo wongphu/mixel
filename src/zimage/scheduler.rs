@@ -61,10 +61,11 @@ impl Scheduler {
     }
 }
 
-/// First step index for img2img: `int(n - min(n * strength, n))`.
+/// First step index for img2img: `int(n - min(n * strength, n))`, with
+/// `strength` clamped to [0, 1] so the result is never past `num_steps`.
 pub fn start_index(num_steps: usize, strength: f64) -> usize {
     let n = num_steps as f64;
-    (n - (n * strength).min(n)).max(0.0) as usize
+    (n - n * strength.clamp(0.0, 1.0)) as usize
 }
 
 #[cfg(test)]

@@ -20,6 +20,8 @@ const ROPE_THETA: f32 = 256.0;
 const T_SCALE: f32 = 1000.0;
 const AXES_DIMS: [usize; 3] = [32, 48, 48];
 const AXES_LENS: [usize; 3] = [1536, 512, 512];
+/// Largest width or height: the RoPE tables cover 512 patches of 16 px per side.
+pub const MAX_SIDE: usize = AXES_LENS[1] * 16;
 const FREQ_EMBED_SIZE: usize = 256;
 const MAX_PERIOD: f64 = 10000.0;
 const PATCH: i32 = 2;

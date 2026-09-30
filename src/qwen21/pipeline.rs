@@ -9,7 +9,8 @@ use super::vision::VisionEncoder;
 use super::{scheduler, OUTPUT_RESOLUTION, VAE_SCALE};
 use crate::nn::ModelFiles;
 use crate::pipeline::{
-    resize_to_fill, seeded_noise, GenerateOptions, Generated, Progress, Timings,
+    composite_over_white, resize_to_fill, seeded_noise, GenerateOptions, Generated, Progress,
+    Timings,
 };
 use anyhow::{Error as E, Result};
 use mlx_rs::{Array, Dtype};
@@ -32,7 +33,9 @@ pub struct QwenPipeline {
 
 /// A reference image prepared once for both encoders.
 struct Reference {
-    /// Resized RGB image for the vision encoder.
+    /// Resized image for the VAE, alpha included.
+    rgba: image::RgbaImage,
+    /// The same composited over white, for the vision encoder.
     rgb: image::RgbImage,
     /// Latent grid (height, width) in 16 px tokens.
     grid: (usize, usize),
@@ -93,14 +96,15 @@ impl QwenPipeline {
             .iter()
             .map(|img| {
                 let (rw, rh) = calculate_dimensions(img.width(), img.height());
-                let rgb = image::imageops::resize(
+                let rgba = image::imageops::resize(
                     img,
                     rw as u32,
                     rh as u32,
                     image::imageops::FilterType::Lanczos3,
                 );
                 Reference {
-                    rgb,
+                    rgb: composite_over_white(&rgba),
+                    rgba,
                     grid: (rh / VAE_SCALE, rw / VAE_SCALE),
                 }
             })
@@ -147,7 +151,7 @@ impl QwenPipeline {
         // VAE: reference latents, and the init image for img2img.
         let ref_latents: Vec<Array> = refs
             .iter()
-            .map(|r| self.encode_image(&r.rgb, r.grid))
+            .map(|r| self.encode_image(&r.rgba, r.grid))
             .collect::<Result<_>>()?;
         let segments = |p: &EncodedPrompt| segments(p, self.image_pad_id, &refs);
         let cache = self
@@ -168,7 +172,8 @@ impl QwenPipeline {
             None => (noise.as_dtype(self.dtype)?, 0),
             Some(img) => {
                 let start = scheduler::start_index(opts.num_steps, opts.strength);
-                let init = self.encode_image(&resize_to_fill(img, w as u32, h as u32), (lh, lw))?;
+                let init = image::DynamicImage::from(resize_to_fill(img, w as u32, h as u32));
+                let init = self.encode_image(&init.to_rgba8(), (lh, lw))?;
                 let sigma = sigmas[start];
                 let x = noise.multiply(Array::from_f32(sigma))?.add(
                     init.as_dtype(Dtype::Float32)?
@@ -212,8 +217,7 @@ impl QwenPipeline {
         let rgba = self
             .vae
             .decode(&x.reshape(&[1, lh as i32, lw as i32, 64])?)?;
-        let image = to_rgb(&rgba)?;
-        mlx_rs::memory::clear_cache()?;
+        let image = to_image(&rgba)?;
 
         Ok(Generated {
             image,
@@ -226,15 +230,15 @@ impl QwenPipeline {
         })
     }
 
-    /// RGB image (already at the latent grid's pixel size) -> packed
-    /// normalized latents (1, h*w, 64). The VAE reads RGBA; alpha is opaque.
-    fn encode_image(&self, img: &image::RgbImage, grid: (usize, usize)) -> Result<Array> {
+    /// RGBA image (already at the latent grid's pixel size) -> packed
+    /// normalized latents (1, h*w, 64).
+    fn encode_image(&self, img: &image::RgbaImage, grid: (usize, usize)) -> Result<Array> {
         let (w, h) = (img.width() as i32, img.height() as i32);
-        let mut px = Vec::with_capacity((w * h * 4) as usize);
-        for p in img.pixels() {
-            px.extend(p.0.iter().map(|&c| c as f32 / 127.5 - 1.0));
-            px.push(1.0);
-        }
+        let px: Vec<f32> = img
+            .as_raw()
+            .iter()
+            .map(|&c| c as f32 / 127.5 - 1.0)
+            .collect();
         let x = Array::from_slice(&px, &[1, h, w, 4]).as_dtype(self.dtype)?;
         let z = self
             .vae
@@ -309,9 +313,9 @@ fn split_off_front(x: &Array, n: i32) -> Result<Array> {
         .expect("tail"))
 }
 
-/// RGBA in [-1, 1] (1, H, W, 4) -> RGB image, rounding like diffusers'
-/// `postprocess`. The alpha channel is dropped (it is ~opaque for photos).
-fn to_rgb(rgba: &Array) -> Result<image::RgbImage> {
+/// RGBA in [-1, 1] (1, H, W, 4) -> image, rounding like diffusers'
+/// `postprocess`. RGB when fully opaque (as for photos), else RGBA.
+fn to_image(rgba: &Array) -> Result<image::DynamicImage> {
     let sh = rgba.shape().to_vec();
     let (h, w) = (sh[1] as u32, sh[2] as u32);
     let x = rgba
@@ -321,18 +325,33 @@ fn to_rgb(rgba: &Array) -> Result<image::RgbImage> {
     let x = mlx_rs::ops::clip(&x, (0.0f32, 1.0f32))?
         .multiply(Array::from_f32(255.0))?
         .round(None)?;
-    let rgb = mlx_rs::ops::split_at_indices(&x, &[3], -1)?
-        .swap_remove(0)
-        .as_dtype(Dtype::Uint8)?
-        .contiguous()?;
-    rgb.eval()?;
-    image::RgbImage::from_raw(w, h, rgb.as_slice::<u8>().to_vec())
-        .ok_or_else(|| anyhow::anyhow!("image buffer size mismatch"))
+    let x = x.as_dtype(Dtype::Uint8)?.contiguous()?;
+    x.eval()?;
+    let img = image::RgbaImage::from_raw(w, h, x.as_slice::<u8>().to_vec())
+        .ok_or_else(|| anyhow::anyhow!("image buffer size mismatch"))?;
+    let opaque = img.pixels().all(|p| p.0[3] == 255);
+    let img = image::DynamicImage::ImageRgba8(img);
+    Ok(if opaque { img.to_rgb8().into() } else { img })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_is_rgb_when_opaque_and_rgba_otherwise() {
+        // 1x2 RGBA in [-1, 1]: red and blue, fully opaque.
+        let px = [1.0, -1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0];
+        let img = to_image(&Array::from_slice(&px, &[1, 1, 2, 4])).unwrap();
+        assert_eq!(img.color(), image::ColorType::Rgb8);
+        assert_eq!(img.to_rgb8().get_pixel(1, 0).0, [0, 0, 255]);
+
+        // The second pixel fully transparent.
+        let px = [1.0, -1.0, -1.0, 1.0, -1.0, -1.0, 1.0, -1.0];
+        let img = to_image(&Array::from_slice(&px, &[1, 1, 2, 4])).unwrap();
+        assert_eq!(img.color(), image::ColorType::Rgba8);
+        assert_eq!(img.to_rgba8().get_pixel(1, 0).0, [0, 0, 255, 0]);
+    }
 
     #[test]
     fn bf16_rounding_matches_reference_timesteps() {

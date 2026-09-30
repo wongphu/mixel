@@ -12,6 +12,10 @@ use mlx_rs::{Array, Dtype};
 use std::time::Instant;
 use tokenizers::Tokenizer;
 
+/// Prompts are cut to this many tokens, like diffusers' `max_sequence_length`
+/// (the transformer's RoPE tables can't go much further).
+pub const MAX_PROMPT_TOKENS: usize = 512;
+
 /// Z-Image-Turbo's models.
 pub struct ZImagePipeline {
     dtype: Dtype,
@@ -124,13 +128,9 @@ impl ZImagePipeline {
             .multiply(scalar(127.5)?)?
             .as_dtype(Dtype::Uint8)?;
         let image = to_rgb_image(&image)?;
-        // MLX keeps freed buffers for reuse. Between images (often of different
-        // sizes) they only pile up: in a mixed-size batch the cache grew to
-        // ~75 GB and steps slowed ~1.5x under memory pressure.
-        mlx_rs::memory::clear_cache()?;
 
         Ok(Generated {
-            image,
+            image: image.into(),
             timings: Timings {
                 text: encoded - started,
                 init_image: image_encoded - encoded,
@@ -162,7 +162,10 @@ impl ZImagePipeline {
             .encode(format_prompt_for_qwen3(prompt).as_str(), true)
             .map_err(E::msg)?
             .get_ids()
-            .to_vec();
+            .iter()
+            .copied()
+            .take(MAX_PROMPT_TOKENS)
+            .collect::<Vec<_>>();
         on_progress(Progress::Encoded {
             tokens: tokens.len(),
         });

@@ -13,6 +13,7 @@ use clap::Parser;
 use image::ImageDecoder;
 use mixel::{GenerateOptions, LoadOptions, Model, Pipeline, Progress};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
@@ -82,6 +83,9 @@ Where the image goes:
 Sizes: width and height must be multiples of 16 (z-image-turbo) or 32
 (qwen-image-2.1); default 1024x1024, or follows --init-image / --ref-image.
 Smaller is faster: 512x512 takes ~14 s with z-image-turbo.
+
+Prompts: z-image-turbo reads at most 512 tokens (a few hundred words) and
+ignores the rest; the \"Token count\" line says when a prompt was cut.
 
 Running it:
   - Takes ~1 min (z-image-turbo) or ~7 min (qwen-image-2.1) per 1024x1024
@@ -283,11 +287,12 @@ fn resolve_size(
     reference_images: &[PathBuf],
     model: Model,
 ) -> Result<(usize, usize)> {
+    // Check every reference image; the last one sets the size.
+    let mut last = None;
     for r in reference_images {
-        dimensions(r, "reference image")?;
+        last = Some(dimensions(r, "reference image")?);
     }
-    if let Some(last) = reference_images.last() {
-        let (rw, rh) = dimensions(last, "reference image")?;
+    if let Some((rw, rh)) = last {
         let (cw, ch) = mixel::qwen21::pipeline::calculate_dimensions(rw, rh);
         return Ok((width.unwrap_or(cw), height.unwrap_or(ch)));
     }
@@ -311,33 +316,46 @@ fn resolve_size(
     })
 }
 
-/// Opens an image as RGB, upright per its EXIF orientation, compositing any
-/// transparency over white.
-fn load_rgb(path: &Path, what: &str) -> Result<image::RgbImage> {
+/// Opens an image, upright per its EXIF orientation.
+fn load_image(path: &Path, what: &str) -> Result<image::DynamicImage> {
     let open = || -> Result<image::DynamicImage> {
         let (decoder, orientation) = decoder(path)?;
         let mut img = image::DynamicImage::from_decoder(decoder)?;
         img.apply_orientation(orientation);
         Ok(img)
     };
-    let img = open().with_context(|| format!("reading {what} {}", path.display()))?;
-    if !img.color().has_alpha() {
-        return Ok(img.to_rgb8());
-    }
-    let rgba = img.to_rgba8();
-    Ok(image::RgbImage::from_fn(
-        rgba.width(),
-        rgba.height(),
-        |x, y| {
-            let p = rgba.get_pixel(x, y).0;
-            let a = p[3] as f32 / 255.0;
-            let mix = |c: u8| (c as f32 * a + 255.0 * (1.0 - a)).round() as u8;
-            image::Rgb([mix(p[0]), mix(p[1]), mix(p[2])])
-        },
-    ))
+    open().with_context(|| format!("reading {what} {}", path.display()))
+}
+
+/// Opens an image as RGB (see [`load_image`]), compositing any transparency
+/// over white.
+fn load_rgb(path: &Path, what: &str) -> Result<image::RgbImage> {
+    let img = load_image(path, what)?;
+    Ok(if img.color().has_alpha() {
+        mixel::composite_over_white(&img.to_rgba8())
+    } else {
+        img.to_rgb8()
+    })
 }
 
 impl Job {
+    /// Library options with 1x1 stand-ins for the images: enough to validate
+    /// and count steps without decoding them.
+    fn settings(&self) -> GenerateOptions {
+        GenerateOptions {
+            prompt: self.prompt.clone(),
+            negative_prompt: self.negative_prompt.clone(),
+            width: self.width,
+            height: self.height,
+            num_steps: self.num_steps,
+            guidance_scale: self.guidance_scale,
+            seed: self.seed,
+            init_image: self.init_image.as_ref().map(|_| image::RgbImage::new(1, 1)),
+            strength: self.strength,
+            reference_images: vec![image::RgbaImage::new(1, 1); self.reference_images.len()],
+        }
+    }
+
     /// Library options for this job, loading its images.
     fn options(&self) -> Result<GenerateOptions> {
         let init_image = match &self.init_image {
@@ -347,41 +365,39 @@ impl Job {
         let reference_images = self
             .reference_images
             .iter()
-            .map(|p| load_rgb(p, "reference image"))
+            .map(|p| Ok(load_image(p, "reference image")?.to_rgba8()))
             .collect::<Result<_>>()?;
         Ok(GenerateOptions {
-            prompt: self.prompt.clone(),
-            negative_prompt: self.negative_prompt.clone(),
-            width: self.width,
-            height: self.height,
-            num_steps: self.num_steps,
-            guidance_scale: self.guidance_scale,
-            seed: self.seed,
             init_image,
-            strength: self.strength,
             reference_images,
+            ..self.settings()
         })
     }
 
-    fn validate(&self) -> Result<()> {
+    /// Checks the job before the model loads. Images are decoded to catch
+    /// corrupt files, each path once across all jobs (tracked in `decoded`).
+    fn validate(&self, decoded: &mut HashSet<PathBuf>) -> Result<()> {
         let ext = self.base_output.extension().and_then(|e| e.to_str());
         anyhow::ensure!(
             ext.is_some_and(|e| ["png", "jpg", "jpeg"].contains(&e.to_ascii_lowercase().as_str())),
             "output {} must end in .png or .jpg",
             self.base_output.display()
         );
-        self.options()?.validate(self.model)
+        self.settings().validate(self.model)?;
+        let init = self.init_image.iter().map(|p| (p, "init image"));
+        let refs = self.reference_images.iter().map(|p| (p, "reference image"));
+        for (path, what) in init.chain(refs) {
+            if !decoded.contains(path) {
+                load_image(path, what)?;
+                decoded.insert(path.clone());
+            }
+        }
+        Ok(())
     }
 
     /// Denoising steps that run (fewer than `num_steps` for img2img).
     fn steps_to_run(&self) -> usize {
-        match self.init_image {
-            Some(_) => {
-                self.num_steps
-                    - mixel::zimage::scheduler::start_index(self.num_steps, self.strength)
-            }
-            None => self.num_steps,
-        }
+        self.settings().steps_to_run()
     }
 
     /// Fills in the seed, picking a random one and appending it to the
@@ -525,6 +541,7 @@ fn read_jobs(path: &Path, args: &Args) -> Result<Vec<Job>> {
     let mut jobs: Vec<Job> = Vec::new();
     let mut errors = Vec::new();
     let mut seen_outputs = std::collections::HashMap::new();
+    let mut decoded = HashSet::new();
 
     for (idx, line) in content.lines().enumerate() {
         let line_no = idx + 1;
@@ -606,7 +623,7 @@ fn read_jobs(path: &Path, args: &Args) -> Result<Vec<Job>> {
             output: args.output_dir.join(output),
         }
         .with_seed(seed);
-        if let Err(e) = job.validate() {
+        if let Err(e) = job.validate(&mut decoded) {
             errors.push(format!("line {line_no}: {e:#}"));
             continue;
         }
@@ -639,7 +656,7 @@ fn run(args: Args) -> Result<()> {
         Some(path) => read_jobs(path, &args)?,
         None => {
             let job = single_job(&args)?;
-            job.validate()?;
+            job.validate(&mut HashSet::new())?;
             vec![job]
         }
     };
@@ -745,7 +762,16 @@ fn run(args: Args) -> Result<()> {
 /// Generates one job's image with progress output and saves it.
 fn generate(pipeline: &Pipeline, job: &Job) -> Result<()> {
     let out = pipeline.generate_with(&job.options()?, |p| match p {
-        Progress::Encoded { tokens } => println!("Token count: {tokens}"),
+        Progress::Encoded { tokens } => {
+            let cut = job.model == Model::ZImageTurbo
+                && tokens >= mixel::zimage::pipeline::MAX_PROMPT_TOKENS;
+            let note = if cut {
+                " (the limit; the rest of the prompt is ignored)"
+            } else {
+                ""
+            };
+            println!("Token count: {tokens}{note}");
+        }
         Progress::Step {
             step,
             total,
@@ -763,7 +789,18 @@ fn generate(pipeline: &Pipeline, job: &Job) -> Result<()> {
         t.denoise.as_secs_f64() / job.steps_to_run().max(1) as f64,
         t.vae.as_secs_f64()
     );
-    out.image
+    // JPEG has no alpha: composite transparent (Qwen-Image) output over white.
+    let png = job
+        .output
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("png"));
+    let image = match out.image {
+        img if img.color().has_alpha() && !png => {
+            mixel::composite_over_white(&img.to_rgba8()).into()
+        }
+        img => img,
+    };
+    image
         .save(&job.output)
         .with_context(|| format!("saving {}", job.output.display()))
 }
@@ -1258,7 +1295,7 @@ not json
         assert_eq!((job.width, job.height), (640, 480));
         assert_eq!(job.strength, DEFAULT_STRENGTH);
         assert_eq!(job.steps_to_run(), 6); // int(9 - 5.4) = 3 skipped
-        job.validate().unwrap();
+        job.validate(&mut HashSet::new()).unwrap();
 
         let opts = job.options().unwrap();
         assert_eq!(opts.init_image.unwrap().dimensions(), (640, 480));
@@ -1267,7 +1304,7 @@ not json
     #[test]
     fn strength_without_init_image_is_rejected() {
         let job = single_job(&args(&["--strength", "0.5", "--seed", "1"])).unwrap();
-        let err = job.validate().unwrap_err().to_string();
+        let err = job.validate(&mut HashSet::new()).unwrap_err().to_string();
         assert!(err.contains("needs an init image"), "{err}");
     }
 
@@ -1289,6 +1326,15 @@ not json
         assert!(err.starts_with("2 invalid line(s)"), "{err}");
         assert!(err.contains("line 2: reading init image"), "{err}");
         assert!(err.contains("line 3: strength must be in (0, 1]"), "{err}");
+
+        // A file whose header reads but whose pixels don't is caught up front.
+        let png = std::fs::read(dir.path().join("a.png")).unwrap();
+        std::fs::write(dir.path().join("cut.png"), &png[..png.len() / 2]).unwrap();
+        let cut = write_jsonl(dir.path(), r#"{"prompt": "a", "init_image": "cut.png"}"#);
+        let err = read_jobs(&cut, &batch_args(&cut, &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("line 1: reading init image"), "{err}");
 
         let ok = write_jsonl(
             dir.path(),
@@ -1336,10 +1382,10 @@ not json
             "--model", "qwen", "--width", "1008", "--seed", "1",
         ]))
         .unwrap();
-        let err = job.validate().unwrap_err().to_string();
+        let err = job.validate(&mut HashSet::new()).unwrap_err().to_string();
         assert!(err.contains("divisible by 32"), "{err}");
         let job = single_job(&args(&["--width", "1008", "--seed", "1"])).unwrap();
-        job.validate().unwrap();
+        job.validate(&mut HashSet::new()).unwrap();
     }
 
     #[test]
@@ -1362,7 +1408,7 @@ not json
         .unwrap();
         assert_eq!((job.width, job.height), (1376, 768));
         assert_eq!(job.reference_images.len(), 2);
-        job.validate().unwrap();
+        job.validate(&mut HashSet::new()).unwrap();
         // An explicit side wins.
         let job = single_job(&args(&[
             "--model",
@@ -1378,7 +1424,7 @@ not json
         assert_eq!((job.width, job.height), (512, 768));
 
         let job = single_job(&args(&["--ref-image", s, "--seed", "1"])).unwrap();
-        let err = job.validate().unwrap_err().to_string();
+        let err = job.validate(&mut HashSet::new()).unwrap_err().to_string();
         assert!(err.contains("does not take reference images"), "{err}");
     }
 

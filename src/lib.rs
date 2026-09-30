@@ -1,4 +1,5 @@
-//! Z-Image-Turbo text-to-image on Apple Silicon with mlx-rs.
+//! Text-to-image, img2img and image editing on Apple Silicon with mlx-rs:
+//! Z-Image-Turbo and Qwen-Image-2.1.
 //!
 //! ```no_run
 //! use mixel::{GenerateOptions, LoadOptions, Pipeline};
@@ -11,8 +12,7 @@
 //! # anyhow::Ok(())
 //! ```
 //!
-//! [`zimage`] holds the model itself (a port of candle-transformers' `z_image`)
-//! for lower-level use.
+//! [`zimage`] and [`qwen21`] hold the models themselves for lower-level use.
 
 pub mod nn;
 mod pipeline;
@@ -20,6 +20,6 @@ pub mod qwen21;
 pub mod zimage;
 
 pub use pipeline::{
-    seeded_noise, GenerateOptions, Generated, LoadOptions, Model, Pipeline, Progress, Timings,
-    DEFAULT_REPO, DEFAULT_STEPS, SIZE_ALIGN,
+    composite_over_white, seeded_noise, GenerateOptions, Generated, LoadOptions, Model, Pipeline,
+    Progress, Timings, DEFAULT_REPO, DEFAULT_STEPS, SIZE_ALIGN,
 };

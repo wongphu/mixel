@@ -86,7 +86,7 @@ let opts = GenerateOptions { seed: 42, width: 768, ..GenerateOptions::new("a red
 let out = pipeline.generate_with(&opts, |p| {
     if let Progress::Step { step, total, .. } = p { eprintln!("step {step}/{total}") }
 })?;
-out.image.save("fox.png")?;          // image::RgbImage
+out.image.save("fox.png")?;          // image::DynamicImage (RGBA if Qwen output has transparency)
 
 println!("{:?}", out.timings);       // text / init image / denoise / vae durations
 
@@ -97,7 +97,7 @@ let variation = GenerateOptions { init_image: Some(photo.clone()), strength: 0.7
 // Qwen-Image-2.1 with a reference image
 let qwen = Pipeline::load(&LoadOptions { model: Model::QwenImage21, ..Default::default() })?;
 let edit = GenerateOptions {
-    reference_images: vec![photo],
+    reference_images: vec![image::open("photo.png")?.to_rgba8()], // alpha is kept
     ..GenerateOptions::for_model(Model::QwenImage21, "make it night")
 };
 qwen.generate(&edit)?.image.save("night.png")?;

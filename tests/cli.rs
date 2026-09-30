@@ -271,6 +271,43 @@ fn qwen_generates_and_edits() {
         (256, 192)
     );
 
+    // One step (used to give NaN sigmas) with a half-transparent reference.
+    let mut rgba = image::open(dir.path().join("a.png")).unwrap().to_rgba8();
+    for (x, _, p) in rgba.enumerate_pixels_mut() {
+        if x < 128 {
+            p.0[3] = 0;
+        }
+    }
+    rgba.save(dir.path().join("t.png")).unwrap();
+    let out = mixel(
+        &[
+            "--model",
+            "qwen-image-2.1",
+            "--seed",
+            "3",
+            "--num-steps",
+            "1",
+            "--prompt",
+            "make the apple green",
+            "--ref-image",
+            "t.png",
+            "--width",
+            "256",
+            "--height",
+            "192",
+            "--output",
+            "c.png",
+        ],
+        dir.path(),
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let c = image::open(dir.path().join("c.png")).unwrap().to_rgb8();
+    let first = c.get_pixel(0, 0);
+    assert!(
+        c.pixels().any(|p| p != first),
+        "one-step image is a single color"
+    );
+
     // Z-Image-Turbo refuses reference images before loading anything.
     let out = mixel(&["--prompt", "x", "--ref-image", "a.png"], dir.path());
     assert!(!out.status.success());
