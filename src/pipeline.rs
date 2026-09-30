@@ -307,7 +307,7 @@ pub struct Pipeline {
 }
 
 enum Inner {
-    ZImage(ZImagePipeline),
+    ZImage(Box<ZImagePipeline>),
     Qwen(Box<QwenPipeline>),
 }
 
@@ -320,7 +320,7 @@ impl Pipeline {
         let repo = opts.repo.as_deref().unwrap_or(opts.model.repo());
         let files = ModelFiles::new(repo, opts.model_path.as_deref())?;
         let inner = match opts.model {
-            Model::ZImageTurbo => Inner::ZImage(ZImagePipeline::load(&files)?),
+            Model::ZImageTurbo => Inner::ZImage(Box::new(ZImagePipeline::load(&files)?)),
             Model::QwenImage21 => Inner::Qwen(Box::new(QwenPipeline::load(&files)?)),
         };
         Ok(Self {

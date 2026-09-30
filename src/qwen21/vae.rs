@@ -21,6 +21,8 @@ const DEC_DIMS: [i32; 6] = [1152, 1152, 1152, 576, 288, 144];
 const TEMPORAL: [bool; 4] = [false, true, true, true];
 const RESNETS: usize = 2;
 
+// Checkpoint values; -0.5236 is not an approximation of pi/6.
+#[allow(clippy::approx_constant)]
 #[rustfmt::skip]
 const LATENTS_MEAN: [f32; 64] = [
     0.5126, 0.7721, -0.0631, 1.3506, -0.7855, -2.1025, -0.3458, 1.3722, 1.8873, -1.7177, -0.651,

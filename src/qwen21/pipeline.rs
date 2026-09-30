@@ -354,6 +354,8 @@ mod tests {
     }
 
     #[test]
+    // The values are exact bf16 numbers, written out in full.
+    #[allow(clippy::excessive_precision)]
     fn bf16_rounding_matches_reference_timesteps() {
         // Values recorded from the reference pipeline (8 steps, 1024 tokens).
         let s = scheduler::sigmas(8, 1024);

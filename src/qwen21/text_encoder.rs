@@ -61,7 +61,7 @@ impl TextEncoder {
         let mut h = self
             .w
             .get("model.language_model.embed_tokens.weight")?
-            .take_axis(&Array::from_slice(&idx, &[len]), 0)?; // (L, 4096)
+            .take_axis(Array::from_slice(&idx, &[len]), 0)?; // (L, 4096)
 
         // Image runs, in order: replace the placeholder embeddings.
         let runs: Vec<(i32, i32)> = images

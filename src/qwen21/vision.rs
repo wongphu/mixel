@@ -109,7 +109,7 @@ impl VisionEncoder {
         let n = (gh * gw) as i32;
         let table = self.w.get("model.visual.pos_embed.weight")?;
         let rows = table
-            .take_axis(&Array::from_slice(&idx, &[n * 4]), 0)?
+            .take_axis(Array::from_slice(&idx, &[n * 4]), 0)?
             .as_dtype(Dtype::Float32)?
             .reshape(&[n, 4, HIDDEN])?;
         let weights = Array::from_slice(&wts, &[n, 4, 1]);
