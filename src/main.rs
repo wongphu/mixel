@@ -10,6 +10,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use image::ImageDecoder;
 use mixel::{GenerateOptions, LoadOptions, Model, Pipeline, Progress};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -64,7 +65,9 @@ Batch file (--input): one JSON object per line.
   else the line number (0003.png), under --output-dir. Other fields
   (negative_prompt, width, height, num_steps, guidance_scale, seed,
   init_image, strength, reference_images) default to the CLI flags. Image
-  paths in the file are relative to the file. ids/outputs must be unique.
+  paths in the file are relative to the file. ids/outputs must be unique
+  (ignoring case) and ids can't contain / or \\. --strength only applies
+  to lines with an init image.
 
 Where the image goes:
   - Always pass --prompt: without it a default landscape prompt is used.
@@ -74,7 +77,7 @@ Where the image goes:
     skips outputs that already exist (--overwrite to regenerate).
   - Each saved image prints a line: \"Done! Image saved to <path> (<secs>s)\".
   - Without --output: z_image_output.png or qwen_image_output.png.
-  - Use a .png or .jpg output name; other formats fail when saving.
+  - Output names must end in .png or .jpg (checked before loading).
 
 Sizes: width and height must be multiples of 16 (z-image-turbo) or 32
 (qwen-image-2.1); default 1024x1024, or follows --init-image / --ref-image.
@@ -246,8 +249,28 @@ fn round_to_align(x: f64, align: usize) -> usize {
     ((x / align as f64).round() as usize).max(1) * align
 }
 
+/// A decoder for `path` and its EXIF orientation (phone photos are often
+/// stored sideways with a tag saying how to turn them upright).
+fn decoder(path: &Path) -> Result<(impl image::ImageDecoder, image::metadata::Orientation)> {
+    let mut decoder = image::ImageReader::open(path)?
+        .with_guessed_format()?
+        .into_decoder()?;
+    let orientation = decoder.orientation()?;
+    Ok((decoder, orientation))
+}
+
+/// Size of the image at `path` as displayed, i.e. after its EXIF orientation.
 fn dimensions(path: &Path, what: &str) -> Result<(u32, u32)> {
-    image::image_dimensions(path).with_context(|| format!("reading {what} {}", path.display()))
+    use image::metadata::Orientation::*;
+    let read = || -> Result<(u32, u32)> {
+        let (decoder, orientation) = decoder(path)?;
+        let (w, h) = decoder.dimensions();
+        Ok(match orientation {
+            Rotate90 | Rotate270 | Rotate90FlipH | Rotate270FlipH => (h, w),
+            _ => (w, h),
+        })
+    };
+    read().with_context(|| format!("reading {what} {}", path.display()))
 }
 
 /// Output size: explicit values win. Missing sides come from the last
@@ -288,9 +311,16 @@ fn resolve_size(
     })
 }
 
-/// Opens an image as RGB, compositing any transparency over white.
+/// Opens an image as RGB, upright per its EXIF orientation, compositing any
+/// transparency over white.
 fn load_rgb(path: &Path, what: &str) -> Result<image::RgbImage> {
-    let img = image::open(path).with_context(|| format!("reading {what} {}", path.display()))?;
+    let open = || -> Result<image::DynamicImage> {
+        let (decoder, orientation) = decoder(path)?;
+        let mut img = image::DynamicImage::from_decoder(decoder)?;
+        img.apply_orientation(orientation);
+        Ok(img)
+    };
+    let img = open().with_context(|| format!("reading {what} {}", path.display()))?;
     if !img.color().has_alpha() {
         return Ok(img.to_rgb8());
     }
@@ -334,6 +364,12 @@ impl Job {
     }
 
     fn validate(&self) -> Result<()> {
+        let ext = self.base_output.extension().and_then(|e| e.to_str());
+        anyhow::ensure!(
+            ext.is_some_and(|e| ["png", "jpg", "jpeg"].contains(&e.to_ascii_lowercase().as_str())),
+            "output {} must end in .png or .jpg",
+            self.base_output.display()
+        );
         self.options()?.validate(self.model)
     }
 
@@ -475,6 +511,10 @@ fn id_file_name(id: &serde_json::Value) -> Result<String> {
         other => anyhow::bail!("id must be a string or a number, got {other}"),
     };
     anyhow::ensure!(!id.is_empty(), "id is empty");
+    anyhow::ensure!(
+        !id.contains(['/', '\\']),
+        "id {id:?} contains a path separator; use output for subdirectories"
+    );
     Ok(format!("{id}.png"))
 }
 
@@ -552,7 +592,12 @@ fn read_jobs(path: &Path, args: &Args) -> Result<Vec<Job>> {
                 .or(args.guidance_scale)
                 .unwrap_or_else(|| model.default_guidance()),
             seed: 0,
-            strength: resolve_strength(spec.strength.or(args.strength), init_image.is_some()),
+            // --strength only applies to lines that have an init image.
+            strength: resolve_strength(
+                spec.strength
+                    .or(args.strength.filter(|_| init_image.is_some())),
+                init_image.is_some(),
+            ),
             init_image,
             reference_images,
             model,
@@ -565,7 +610,9 @@ fn read_jobs(path: &Path, args: &Args) -> Result<Vec<Job>> {
             errors.push(format!("line {line_no}: {e:#}"));
             continue;
         }
-        if let Some(prev) = seen_outputs.insert(job.base_output.clone(), line_no) {
+        // macOS file systems ignore case: Fox.png and fox.png are one file.
+        let key = job.base_output.to_string_lossy().to_lowercase();
+        if let Some(prev) = seen_outputs.insert(key, line_no) {
             errors.push(format!(
                 "line {line_no}: output {} is also used by line {prev}",
                 job.base_output.display()
@@ -660,11 +707,14 @@ fn run(args: Args) -> Result<()> {
         for r in &job.reference_images {
             println!("Reference image: {}", r.display());
         }
-        if let Some(parent) = job.output.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let start = std::time::Instant::now();
-        match generate(&pipeline, job) {
+        let result = match job.output.parent() {
+            Some(parent) => std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display())),
+            None => Ok(()),
+        }
+        .and_then(|()| generate(&pipeline, job));
+        match result {
             Ok(()) => println!(
                 "Done! Image saved to {} ({:.1}s)",
                 job.output.display(),
@@ -917,6 +967,76 @@ mod tests {
         ] {
             assert!(err.contains(expected), "missing {expected:?} in:\n{err}");
         }
+    }
+
+    #[test]
+    fn read_jobs_rejects_ids_with_path_separators() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = write_jsonl(
+            dir.path(),
+            concat!(
+                "{\"id\": \"AC/DC\", \"prompt\": \"a\"}\n",
+                "{\"id\": \"..\\\\x\", \"prompt\": \"b\"}\n",
+            ),
+        );
+        let err = read_jobs(&input, &batch_args(&input, &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("2 invalid line(s)"), "{err}");
+        assert!(
+            err.contains("line 1: id \"AC/DC\" contains a path separator"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn read_jobs_rejects_outputs_differing_only_in_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = write_jsonl(
+            dir.path(),
+            "{\"id\": \"Fox\", \"prompt\": \"a\"}\n{\"id\": \"fox\", \"prompt\": \"b\"}\n",
+        );
+        let err = read_jobs(&input, &batch_args(&input, &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("line 2: output ./fox.png is also used by line 1"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn read_jobs_checks_output_format_before_loading() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = write_jsonl(
+            dir.path(),
+            concat!(
+                "{\"prompt\": \"a\", \"output\": \"a.webp\"}\n",
+                "{\"prompt\": \"b\", \"output\": \"noext\"}\n",
+                "{\"prompt\": \"c\", \"output\": \"\"}\n",
+                "{\"prompt\": \"d\", \"output\": \"D.JPG\"}\n",
+            ),
+        );
+        let err = read_jobs(&input, &batch_args(&input, &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("3 invalid line(s)"), "{err}");
+        for line in 1..=3 {
+            assert!(err.contains(&format!("line {line}: output")), "{err}");
+        }
+        assert!(err.contains("must end in .png or .jpg"), "{err}");
+    }
+
+    #[test]
+    fn cli_strength_only_applies_to_lines_with_an_init_image() {
+        let dir = tempfile::tempdir().unwrap();
+        write_png(dir.path(), "in.png", 64, 64);
+        let input = write_jsonl(
+            dir.path(),
+            "{\"prompt\": \"a\"}\n{\"prompt\": \"b\", \"init_image\": \"in.png\"}\n",
+        );
+        let jobs = read_jobs(&input, &batch_args(&input, &["--strength", "0.5"])).unwrap();
+        assert_eq!((jobs[0].strength, jobs[1].strength), (1.0, 0.5));
     }
 
     #[test]
@@ -1285,6 +1405,39 @@ not json
         let jobs = read_jobs(&ok, &batch_args(&ok, &["--model", "qwen"])).unwrap();
         assert_eq!(jobs[0].reference_images, vec![dir.path().join("a.png")]);
         assert_eq!((jobs[0].width, jobs[0].height), (1024, 1024));
+    }
+
+    #[test]
+    fn images_are_turned_upright_by_exif_orientation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("phone.jpg");
+        // Stored 64x32 (landscape) with Orientation = 6: rotate 90 to display.
+        #[rustfmt::skip]
+        let exif = vec![
+            b'I', b'I', 42, 0, 8, 0, 0, 0, // TIFF header, first IFD at 8
+            1, 0,                          // one entry
+            0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, // Orientation, SHORT, 1, 6
+            0, 0, 0, 0,                    // no next IFD
+        ];
+        let mut img = image::RgbImage::from_pixel(64, 32, image::Rgb([0, 0, 0]));
+        img.put_pixel(0, 0, image::Rgb([255, 255, 255]));
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+            std::fs::File::create(&path).unwrap(),
+            100,
+        );
+        image::ImageEncoder::set_exif_metadata(&mut encoder, exif).unwrap();
+        encoder.encode_image(&img).unwrap();
+
+        assert_eq!(dimensions(&path, "image").unwrap(), (32, 64));
+        let rgb = load_rgb(&path, "image").unwrap();
+        assert_eq!(rgb.dimensions(), (32, 64));
+        // Rotating 90 clockwise moves the top-left pixel to the top-right.
+        assert!(
+            rgb.get_pixel(31, 0).0[0] > 200,
+            "{:?}",
+            rgb.get_pixel(31, 0)
+        );
+        assert!(rgb.get_pixel(0, 0).0[0] < 50, "{:?}", rgb.get_pixel(0, 0));
     }
 
     #[test]

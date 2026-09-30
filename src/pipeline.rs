@@ -203,6 +203,12 @@ impl GenerateOptions {
         );
         anyhow::ensure!(!self.prompt.trim().is_empty(), "prompt is empty");
         anyhow::ensure!(self.num_steps > 0, "num_steps must be at least 1");
+        anyhow::ensure!(
+            self.width > 0 && self.height > 0,
+            "width and height must be positive, got {}x{}",
+            self.width,
+            self.height
+        );
         match &self.init_image {
             Some(img) => {
                 anyhow::ensure!(
@@ -406,6 +412,12 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("num_steps"));
+
+        assert!(opts(0, 512)
+            .validate(Model::ZImageTurbo)
+            .unwrap_err()
+            .to_string()
+            .contains("must be positive"));
     }
 
     #[test]

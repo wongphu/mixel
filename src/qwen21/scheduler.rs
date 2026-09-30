@@ -32,11 +32,14 @@ pub fn sigmas(num_steps: usize, image_seq_len: usize) -> Vec<f32> {
         // Exponential time shift: e^mu / (e^mu + (1/t - 1)).
         .map(|t| e_mu / (e_mu + (1.0 / t - 1.0)))
         .collect();
-    // Stretch so the schedule ends at shift_terminal.
-    let one_minus_last = 1.0 - s[n - 1];
-    let scale = one_minus_last / (1.0 - SHIFT_TERMINAL);
-    for v in &mut s {
-        *v = 1.0 - (1.0 - *v) / scale;
+    // Stretch so the schedule ends at shift_terminal. A single step has
+    // nothing to stretch (its only sigma is 1, and 0 / 0 would be NaN).
+    if n > 1 {
+        let one_minus_last = 1.0 - s[n - 1];
+        let scale = one_minus_last / (1.0 - SHIFT_TERMINAL);
+        for v in &mut s {
+            *v = 1.0 - (1.0 - *v) / scale;
+        }
     }
     s.push(0.0);
     s
@@ -59,5 +62,10 @@ mod tests {
         assert!((s[7] - SHIFT_TERMINAL).abs() < 1e-6);
         assert_eq!(s[8], 0.0);
         assert!(s.windows(2).all(|w| w[0] > w[1]));
+    }
+
+    #[test]
+    fn single_step_goes_from_noise_to_image() {
+        assert_eq!(sigmas(1, 4096), vec![1.0, 0.0]);
     }
 }
