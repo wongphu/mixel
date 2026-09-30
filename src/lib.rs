@@ -14,10 +14,12 @@
 //! [`zimage`] holds the model itself (a port of candle-transformers' `z_image`)
 //! for lower-level use.
 
+pub mod nn;
 mod pipeline;
+pub mod qwen21;
 pub mod zimage;
 
 pub use pipeline::{
-    seeded_noise, GenerateOptions, Generated, LoadOptions, Pipeline, Progress, Timings,
+    seeded_noise, GenerateOptions, Generated, LoadOptions, Model, Pipeline, Progress, Timings,
     DEFAULT_REPO, DEFAULT_STEPS, SIZE_ALIGN,
 };

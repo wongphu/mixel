@@ -25,3 +25,17 @@ SOFTWARE.
 The Z-Image model code in src/zimage/ is ported from the z_image module of
 candle-transformers (https://github.com/huggingface/candle), Copyright (c) the
 candle authors, used under the MIT License above.
+
+The Qwen-Image-2.1 code in src/qwen21/ is a Rust port (translated from Python
+to Rust, restructured for MLX and single-image inference) of:
+
+- diffusers (https://github.com/huggingface/diffusers): QwenImage21Pipeline,
+  QwenImage21Transformer2DModel, AutoencoderKLQwenImage21 and
+  FlowMatchEulerDiscreteScheduler, Copyright 2026 Qwen-Image Team and
+  The HuggingFace Team;
+- transformers (https://github.com/huggingface/transformers): Qwen3-VL
+  (text and vision models) and the Qwen2-VL image processor, Copyright
+  The HuggingFace Team;
+
+both licensed under the Apache License, Version 2.0, included in LICENSE-APACHE.
+scripts/make_qwen21_reference.py uses those libraries.

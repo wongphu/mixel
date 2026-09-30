@@ -5,32 +5,30 @@
 //! mixel --prompt "A beautiful landscape with mountains" --seed 42
 //! mixel --input prompts.jsonl --output-dir out
 //! mixel --init-image photo.jpg --strength 0.6 --prompt "a watercolor painting"
+//! mixel --model qwen-image-2.1 --ref-image photo.jpg --prompt "Make it night"
 //! ```
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use mixel::{
-    GenerateOptions, LoadOptions, Pipeline, Progress, DEFAULT_REPO, DEFAULT_STEPS, SIZE_ALIGN,
-};
+use mixel::{GenerateOptions, LoadOptions, Model, Pipeline, Progress};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
-enum Model {
-    /// Z-Image-Turbo: optimized for fast inference (8-9 steps)
-    Turbo,
+enum ModelArg {
+    /// Z-Image-Turbo: fast (9 steps); text-to-image and img2img
+    #[value(name = "z-image-turbo", alias = "turbo")]
+    ZImageTurbo,
+    /// Qwen-Image-2.1: slower (40 steps); also edits with --ref-image
+    #[value(name = "qwen-image-2.1", alias = "qwen")]
+    QwenImage21,
 }
 
-impl Model {
-    fn repo(&self) -> &'static str {
+impl ModelArg {
+    fn model(self) -> Model {
         match self {
-            Self::Turbo => DEFAULT_REPO,
-        }
-    }
-
-    fn default_steps(&self) -> usize {
-        match self {
-            Self::Turbo => DEFAULT_STEPS,
+            Self::ZImageTurbo => Model::ZImageTurbo,
+            Self::QwenImage21 => Model::QwenImage21,
         }
     }
 }
@@ -54,55 +52,65 @@ struct Args {
     #[arg(long)]
     cpu: bool,
 
-    /// The height in pixels of the generated image [default: 1024, or from --init-image].
+    /// The height in pixels of the generated image [default: 1024, or from --ref-image / --init-image].
     #[arg(long)]
     height: Option<usize>,
 
-    /// The width in pixels of the generated image [default: 1024, or from --init-image].
+    /// The width in pixels of the generated image [default: 1024, or from --ref-image / --init-image].
     #[arg(long)]
     width: Option<usize>,
 
     /// Start from this image (img2img). Without --width/--height, the output
-    /// keeps its aspect ratio, rounded to multiples of 16, longest side <= 1024.
+    /// keeps its aspect ratio, rounded to the model's size multiple, longest
+    /// side <= 1024.
     #[arg(long)]
     init_image: Option<PathBuf>,
+
+    /// Base the image on this reference image and edit it as the prompt says
+    /// (qwen-image-2.1 only). Repeat for several images. Without
+    /// --width/--height, the output takes the last image's aspect ratio at
+    /// about 1024x1024 px.
+    #[arg(long = "ref-image")]
+    ref_images: Vec<PathBuf>,
 
     /// With --init-image: how much to change it, in (0, 1]. Low keeps the
     /// image close to the original; 1.0 ignores its content. [default: 0.6]
     #[arg(long)]
     strength: Option<f64>,
 
-    /// Number of inference steps.
+    /// Number of inference steps [default: 9 for z-image-turbo, 40 for qwen-image-2.1].
     #[arg(long)]
     num_steps: Option<usize>,
 
-    /// Guidance scale for CFG.
-    #[arg(long, default_value_t = 5.0)]
-    guidance_scale: f64,
+    /// Guidance scale for CFG, used with --negative-prompt [default: 5 for
+    /// z-image-turbo, 1 (off) for qwen-image-2.1].
+    #[arg(long)]
+    guidance_scale: Option<f64>,
 
     /// The seed to use when generating random samples. If omitted, a random
     /// seed is used and appended to the output filename, e.g. out-1234.png.
     #[arg(long)]
     seed: Option<u64>,
 
-    /// Which model variant to use.
-    #[arg(long, value_enum, default_value = "turbo")]
-    model: Model,
+    /// Which model to use.
+    #[arg(long, value_enum, default_value = "z-image-turbo")]
+    model: ModelArg,
 
     /// Override path to the model weights directory (uses HuggingFace by default).
     #[arg(long)]
     model_path: Option<String>,
 
-    /// Output image filename.
-    #[arg(long, default_value = "z_image_output.png", conflicts_with = "input")]
-    output: String,
+    /// Output image filename [default: z_image_output.png or qwen_image_output.png].
+    #[arg(long, conflicts_with = "input")]
+    output: Option<String>,
 
     /// JSONL file with one image per line, e.g.
     /// {"prompt": "a cat", "seed": 1, "width": 768, "output": "cat.png"}.
     /// Fields: prompt (required), negative_prompt, width, height, num_steps,
-    /// guidance_scale, seed, output, init_image, strength. Omitted fields use
-    /// the CLI values; omitted output defaults to the line number, e.g.
-    /// 0003.png. Relative init_image paths are relative to the JSONL file.
+    /// guidance_scale, seed, output, init_image, strength, reference_images
+    /// (a list). Omitted fields use the CLI values; omitted output defaults to
+    /// the line number, e.g. 0003.png. Relative image paths are relative to
+    /// the JSONL file.
     #[arg(long, short)]
     input: Option<PathBuf>,
 
@@ -113,6 +121,12 @@ struct Args {
     /// With --input, regenerate images whose output file already exists.
     #[arg(long, requires = "input")]
     overwrite: bool,
+}
+
+impl Args {
+    fn model(&self) -> Model {
+        self.model.model()
+    }
 }
 
 /// One image to generate, with all defaults resolved.
@@ -129,6 +143,8 @@ struct Job {
     seed: u64,
     init_image: Option<PathBuf>,
     strength: f64,
+    reference_images: Vec<PathBuf>,
+    model: Model,
     /// True when the seed was picked at random; it is then part of `output`.
     random_seed: bool,
     /// The output path before any random seed is appended.
@@ -150,6 +166,7 @@ struct JobSpec {
     output: Option<String>,
     init_image: Option<String>,
     strength: Option<f64>,
+    reference_images: Option<Vec<String>>,
 }
 
 /// Default img2img strength: keeps the layout and colors, changes the rest.
@@ -157,47 +174,84 @@ const DEFAULT_STRENGTH: f64 = 0.6;
 /// Longest side for sizes derived from an init image.
 const MAX_AUTO_SIDE: f64 = 1024.0;
 
-/// Rounds to the nearest multiple of 16, at least 16.
-fn round_to_align(x: f64) -> usize {
-    let a = SIZE_ALIGN as f64;
-    ((x / a).round() as usize).max(1) * SIZE_ALIGN
+/// Rounds to the nearest multiple of `align`, at least `align`.
+fn round_to_align(x: f64, align: usize) -> usize {
+    ((x / align as f64).round() as usize).max(1) * align
 }
 
-/// Output size: explicit values win; otherwise derived from the init image's
-/// aspect ratio (longest side capped at 1024); otherwise 1024x1024.
+fn dimensions(path: &Path, what: &str) -> Result<(u32, u32)> {
+    image::image_dimensions(path).with_context(|| format!("reading {what} {}", path.display()))
+}
+
+/// Output size: explicit values win. Missing sides come from the last
+/// reference image (at ~1024x1024 px, like Qwen-Image's own pipeline), else
+/// from the init image's aspect ratio (longest side capped at 1024), else 1024.
 fn resolve_size(
     width: Option<usize>,
     height: Option<usize>,
     init_image: Option<&Path>,
+    reference_images: &[PathBuf],
+    model: Model,
 ) -> Result<(usize, usize)> {
+    for r in reference_images {
+        dimensions(r, "reference image")?;
+    }
+    if let Some(last) = reference_images.last() {
+        let (rw, rh) = dimensions(last, "reference image")?;
+        let (cw, ch) = mixel::qwen21::pipeline::calculate_dimensions(rw, rh);
+        return Ok((width.unwrap_or(cw), height.unwrap_or(ch)));
+    }
     let Some(path) = init_image else {
         return Ok((width.unwrap_or(1024), height.unwrap_or(1024)));
     };
-    let (iw, ih) = image::image_dimensions(path)
-        .with_context(|| format!("reading init image {}", path.display()))?;
+    let (iw, ih) = dimensions(path, "init image")?;
     let (iw, ih) = (iw as f64, ih as f64);
+    let align = model.size_align();
     Ok(match (width, height) {
         (Some(w), Some(h)) => (w, h),
-        (Some(w), None) => (w, round_to_align(w as f64 * ih / iw)),
-        (None, Some(h)) => (round_to_align(h as f64 * iw / ih), h),
+        (Some(w), None) => (w, round_to_align(w as f64 * ih / iw, align)),
+        (None, Some(h)) => (round_to_align(h as f64 * iw / ih, align), h),
         (None, None) => {
             let scale = (MAX_AUTO_SIDE / iw.max(ih)).min(1.0);
-            (round_to_align(iw * scale), round_to_align(ih * scale))
+            (
+                round_to_align(iw * scale, align),
+                round_to_align(ih * scale, align),
+            )
         }
     })
 }
 
+/// Opens an image as RGB, compositing any transparency over white.
+fn load_rgb(path: &Path, what: &str) -> Result<image::RgbImage> {
+    let img = image::open(path).with_context(|| format!("reading {what} {}", path.display()))?;
+    if !img.color().has_alpha() {
+        return Ok(img.to_rgb8());
+    }
+    let rgba = img.to_rgba8();
+    Ok(image::RgbImage::from_fn(
+        rgba.width(),
+        rgba.height(),
+        |x, y| {
+            let p = rgba.get_pixel(x, y).0;
+            let a = p[3] as f32 / 255.0;
+            let mix = |c: u8| (c as f32 * a + 255.0 * (1.0 - a)).round() as u8;
+            image::Rgb([mix(p[0]), mix(p[1]), mix(p[2])])
+        },
+    ))
+}
+
 impl Job {
-    /// Library options for this job, loading the init image if there is one.
+    /// Library options for this job, loading its images.
     fn options(&self) -> Result<GenerateOptions> {
         let init_image = match &self.init_image {
-            Some(p) => Some(
-                image::open(p)
-                    .with_context(|| format!("reading init image {}", p.display()))?
-                    .to_rgb8(),
-            ),
+            Some(p) => Some(load_rgb(p, "init image")?),
             None => None,
         };
+        let reference_images = self
+            .reference_images
+            .iter()
+            .map(|p| load_rgb(p, "reference image"))
+            .collect::<Result<_>>()?;
         Ok(GenerateOptions {
             prompt: self.prompt.clone(),
             negative_prompt: self.negative_prompt.clone(),
@@ -208,11 +262,12 @@ impl Job {
             seed: self.seed,
             init_image,
             strength: self.strength,
+            reference_images,
         })
     }
 
     fn validate(&self) -> Result<()> {
-        self.options()?.validate()
+        self.options()?.validate(self.model)
     }
 
     /// Denoising steps that run (fewer than `num_steps` for img2img).
@@ -302,23 +357,45 @@ fn resolve_strength(strength: Option<f64>, has_init_image: bool) -> f64 {
     })
 }
 
+/// The single-image output file: `--output`, else a per-model default.
+fn default_output(args: &Args) -> PathBuf {
+    match (&args.output, args.model()) {
+        (Some(o), _) => PathBuf::from(o),
+        (None, Model::ZImageTurbo) => PathBuf::from("z_image_output.png"),
+        (None, Model::QwenImage21) => PathBuf::from("qwen_image_output.png"),
+    }
+}
+
 fn single_job(args: &Args) -> Result<Job> {
+    let model = args.model();
     let init_image = args.init_image.clone();
-    let (width, height) = resolve_size(args.width, args.height, init_image.as_deref())?;
+    let reference_images = args.ref_images.clone();
+    let (width, height) = resolve_size(
+        args.width,
+        args.height,
+        init_image.as_deref(),
+        &reference_images,
+        model,
+    )?;
+    let output = default_output(args);
     Ok(Job {
         line: 0,
         prompt: args.prompt.clone(),
         negative_prompt: args.negative_prompt.clone(),
         width,
         height,
-        num_steps: args.num_steps.unwrap_or_else(|| args.model.default_steps()),
-        guidance_scale: args.guidance_scale,
+        num_steps: args.num_steps.unwrap_or_else(|| model.default_steps()),
+        guidance_scale: args
+            .guidance_scale
+            .unwrap_or_else(|| model.default_guidance()),
         seed: 0,
         strength: resolve_strength(args.strength, init_image.is_some()),
         init_image,
+        reference_images,
+        model,
         random_seed: false,
-        base_output: PathBuf::from(&args.output),
-        output: PathBuf::from(&args.output),
+        base_output: output.clone(),
+        output,
     }
     .with_seed(args.seed))
 }
@@ -345,15 +422,23 @@ fn read_jobs(path: &Path, args: &Args) -> Result<Vec<Job>> {
         };
         let output = spec.output.unwrap_or_else(|| format!("{line_no:04}.png"));
         let seed = spec.seed.or(args.seed);
-        // Line paths are relative to the JSONL file; the CLI default to the cwd.
+        // Line paths are relative to the JSONL file; the CLI defaults to the cwd.
+        let base = path.parent().unwrap_or(Path::new("."));
         let init_image = match spec.init_image {
-            Some(p) => Some(path.parent().unwrap_or(Path::new(".")).join(p)),
+            Some(p) => Some(base.join(p)),
             None => args.init_image.clone(),
         };
+        let reference_images = match spec.reference_images {
+            Some(list) => list.into_iter().map(|p| base.join(p)).collect(),
+            None => args.ref_images.clone(),
+        };
+        let model = args.model();
         let size = resolve_size(
             spec.width.or(args.width),
             spec.height.or(args.height),
             init_image.as_deref(),
+            &reference_images,
+            model,
         );
         let (width, height) = match size {
             Ok(size) => size,
@@ -373,11 +458,16 @@ fn read_jobs(path: &Path, args: &Args) -> Result<Vec<Job>> {
             num_steps: spec
                 .num_steps
                 .or(args.num_steps)
-                .unwrap_or_else(|| args.model.default_steps()),
-            guidance_scale: spec.guidance_scale.unwrap_or(args.guidance_scale),
+                .unwrap_or_else(|| model.default_steps()),
+            guidance_scale: spec
+                .guidance_scale
+                .or(args.guidance_scale)
+                .unwrap_or_else(|| model.default_guidance()),
             seed: 0,
             strength: resolve_strength(spec.strength.or(args.strength), init_image.is_some()),
             init_image,
+            reference_images,
+            model,
             random_seed: false,
             base_output: args.output_dir.join(&output),
             output: args.output_dir.join(output),
@@ -437,9 +527,8 @@ fn run(args: Args) -> Result<()> {
         return Ok(());
     }
 
-    println!("Z-Image Text-to-Image Generation");
-    println!("================================");
-    println!("Model: {:?}", args.model);
+    let model = args.model();
+    println!("mixel: {model}");
     if let Some(path) = &args.input {
         println!(
             "Input: {} ({} to generate, {} skipped)",
@@ -451,11 +540,12 @@ fn run(args: Args) -> Result<()> {
 
     match &args.model_path {
         Some(p) => println!("\nLoading model from {p}..."),
-        None => println!("\nLoading model {}...", args.model.repo()),
+        None => println!("\nLoading model {}...", model.repo()),
     }
     let load_start = std::time::Instant::now();
     let pipeline = Pipeline::load(&LoadOptions {
-        repo: args.model.repo().into(),
+        model,
+        repo: None,
         model_path: args.model_path.as_ref().map(PathBuf::from),
         cpu: args.cpu,
     })?;
@@ -478,6 +568,9 @@ fn run(args: Args) -> Result<()> {
                 job.steps_to_run(),
                 job.num_steps
             );
+        }
+        for r in &job.reference_images {
+            println!("Reference image: {}", r.display());
         }
         if let Some(parent) = job.output.parent() {
             std::fs::create_dir_all(parent)?;
@@ -576,6 +669,8 @@ mod tests {
             seed: 0,
             init_image: None,
             strength: 1.0,
+            reference_images: Vec::new(),
+            model: Model::ZImageTurbo,
             random_seed: false,
             base_output: "out.png".into(),
             output: "out.png".into(),
@@ -828,16 +923,22 @@ not json
 
     #[test]
     fn round_to_align_rounds_to_nearest_16() {
-        assert_eq!(round_to_align(1000.0), 1008);
-        assert_eq!(round_to_align(1024.0), 1024);
-        assert_eq!(round_to_align(575.9), 576);
-        assert_eq!(round_to_align(3.0), 16);
+        assert_eq!(round_to_align(1000.0, 16), 1008);
+        assert_eq!(round_to_align(1024.0, 16), 1024);
+        assert_eq!(round_to_align(575.9, 16), 576);
+        assert_eq!(round_to_align(3.0, 16), 16);
     }
 
     #[test]
     fn resolve_size_without_image_defaults_to_1024() {
-        assert_eq!(resolve_size(None, None, None).unwrap(), (1024, 1024));
-        assert_eq!(resolve_size(Some(512), None, None).unwrap(), (512, 1024));
+        assert_eq!(
+            resolve_size(None, None, None, &[], Model::ZImageTurbo).unwrap(),
+            (1024, 1024)
+        );
+        assert_eq!(
+            resolve_size(Some(512), None, None, &[], Model::ZImageTurbo).unwrap(),
+            (512, 1024)
+        );
     }
 
     #[test]
@@ -845,28 +946,41 @@ not json
         let dir = tempfile::tempdir().unwrap();
         let img = write_png(dir.path(), "wide.png", 400, 300);
         // Small images keep their size (rounded), large ones are capped at 1024.
-        assert_eq!(resolve_size(None, None, Some(&img)).unwrap(), (400, 304));
+        assert_eq!(
+            resolve_size(None, None, Some(&img), &[], Model::ZImageTurbo).unwrap(),
+            (400, 304)
+        );
         let big = write_png(dir.path(), "big.png", 3000, 2000);
-        assert_eq!(resolve_size(None, None, Some(&big)).unwrap(), (1024, 688));
+        assert_eq!(
+            resolve_size(None, None, Some(&big), &[], Model::ZImageTurbo).unwrap(),
+            (1024, 688)
+        );
         // One explicit side: the other follows the aspect ratio.
         assert_eq!(
-            resolve_size(Some(800), None, Some(&img)).unwrap(),
+            resolve_size(Some(800), None, Some(&img), &[], Model::ZImageTurbo).unwrap(),
             (800, 608)
         );
         assert_eq!(
-            resolve_size(None, Some(600), Some(&img)).unwrap(),
+            resolve_size(None, Some(600), Some(&img), &[], Model::ZImageTurbo).unwrap(),
             (800, 600)
         );
         // Both explicit: used as-is (the image is cropped to fill).
         assert_eq!(
-            resolve_size(Some(512), Some(512), Some(&img)).unwrap(),
+            resolve_size(Some(512), Some(512), Some(&img), &[], Model::ZImageTurbo).unwrap(),
             (512, 512)
         );
     }
 
     #[test]
     fn resolve_size_reports_missing_image() {
-        let err = resolve_size(None, None, Some(Path::new("/no/such.png"))).unwrap_err();
+        let err = resolve_size(
+            None,
+            None,
+            Some(Path::new("/no/such.png")),
+            &[],
+            Model::ZImageTurbo,
+        )
+        .unwrap_err();
         assert!(
             format!("{err:#}").contains("reading init image /no/such.png"),
             "{err:#}"
@@ -933,6 +1047,119 @@ not json
             (320, 320, 0.3)
         );
         assert_eq!(jobs[0].steps_to_run(), 3); // int(9 - 2.7) = 6 skipped
+    }
+
+    // ---------- models ----------
+
+    #[test]
+    fn model_flag_accepts_names_and_aliases() {
+        assert_eq!(args(&[]).model(), Model::ZImageTurbo);
+        assert_eq!(args(&["--model", "turbo"]).model(), Model::ZImageTurbo);
+        assert_eq!(
+            args(&["--model", "qwen-image-2.1"]).model(),
+            Model::QwenImage21
+        );
+        assert_eq!(args(&["--model", "qwen"]).model(), Model::QwenImage21);
+        assert!(Args::try_parse_from(["candy", "--model", "sdxl"]).is_err());
+    }
+
+    #[test]
+    fn qwen_uses_its_own_defaults() {
+        let job = single_job(&args(&["--model", "qwen-image-2.1", "--seed", "1"])).unwrap();
+        assert_eq!((job.num_steps, job.guidance_scale), (40, 1.0));
+        assert_eq!(job.output, PathBuf::from("qwen_image_output.png"));
+        let job = single_job(&args(&["--seed", "1"])).unwrap();
+        assert_eq!((job.num_steps, job.guidance_scale), (9, 5.0));
+        assert_eq!(job.output, PathBuf::from("z_image_output.png"));
+    }
+
+    #[test]
+    fn qwen_sizes_must_be_multiples_of_32() {
+        let job = single_job(&args(&[
+            "--model", "qwen", "--width", "1008", "--seed", "1",
+        ]))
+        .unwrap();
+        let err = job.validate().unwrap_err().to_string();
+        assert!(err.contains("divisible by 32"), "{err}");
+        let job = single_job(&args(&["--width", "1008", "--seed", "1"])).unwrap();
+        job.validate().unwrap();
+    }
+
+    #[test]
+    fn reference_images_set_the_size_and_need_qwen() {
+        let dir = tempfile::tempdir().unwrap();
+        let wide = write_png(dir.path(), "wide.png", 1920, 1080);
+        let sq = write_png(dir.path(), "sq.png", 300, 300);
+        let (w, s) = (wide.to_str().unwrap(), sq.to_str().unwrap());
+        // The last reference image decides the aspect ratio, at ~1024^2 px.
+        let job = single_job(&args(&[
+            "--model",
+            "qwen",
+            "--ref-image",
+            s,
+            "--ref-image",
+            w,
+            "--seed",
+            "1",
+        ]))
+        .unwrap();
+        assert_eq!((job.width, job.height), (1376, 768));
+        assert_eq!(job.reference_images.len(), 2);
+        job.validate().unwrap();
+        // An explicit side wins.
+        let job = single_job(&args(&[
+            "--model",
+            "qwen",
+            "--ref-image",
+            w,
+            "--width",
+            "512",
+            "--seed",
+            "1",
+        ]))
+        .unwrap();
+        assert_eq!((job.width, job.height), (512, 768));
+
+        let job = single_job(&args(&["--ref-image", s, "--seed", "1"])).unwrap();
+        let err = job.validate().unwrap_err().to_string();
+        assert!(err.contains("does not take reference images"), "{err}");
+    }
+
+    #[test]
+    fn read_jobs_resolves_reference_images_relative_to_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        write_png(dir.path(), "a.png", 640, 640);
+        let input = write_jsonl(
+            dir.path(),
+            r#"{"prompt": "edit", "seed": 1, "reference_images": ["a.png"]}
+{"prompt": "bad", "seed": 2, "reference_images": ["nope.png"]}
+"#,
+        );
+        let err = read_jobs(&input, &batch_args(&input, &["--model", "qwen"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("1 invalid line(s)"), "{err}");
+        assert!(err.contains("line 2: reading reference image"), "{err}");
+
+        let ok = write_jsonl(
+            dir.path(),
+            r#"{"prompt": "edit", "seed": 1, "reference_images": ["a.png"]}"#,
+        );
+        let jobs = read_jobs(&ok, &batch_args(&ok, &["--model", "qwen"])).unwrap();
+        assert_eq!(jobs[0].reference_images, vec![dir.path().join("a.png")]);
+        assert_eq!((jobs[0].width, jobs[0].height), (1024, 1024));
+    }
+
+    #[test]
+    fn load_rgb_composites_transparency_over_white() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.png");
+        let mut img = image::RgbaImage::from_pixel(2, 1, image::Rgba([0, 0, 0, 0]));
+        img.put_pixel(1, 0, image::Rgba([10, 20, 30, 255]));
+        img.save(&path).unwrap();
+        let rgb = load_rgb(&path, "image").unwrap();
+        assert_eq!(rgb.get_pixel(0, 0).0, [255, 255, 255]);
+        assert_eq!(rgb.get_pixel(1, 0).0, [10, 20, 30]);
     }
 
     // ---------- CLI ----------

@@ -202,3 +202,72 @@ fn img2img_matches_text_to_image_at_full_strength_and_follows_image_size() {
         (320, 192)
     );
 }
+
+#[test]
+#[ignore = "needs the ~31 GB Qwen-Image-2.1 weights and a GPU; run with --ignored"]
+fn qwen_generates_and_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = [
+        "--model",
+        "qwen-image-2.1",
+        "--seed",
+        "3",
+        "--num-steps",
+        "2",
+    ];
+    let out = mixel(
+        &[
+            &base[..],
+            &[
+                "--prompt",
+                "a red apple",
+                "--width",
+                "256",
+                "--height",
+                "192",
+                "--output",
+                "a.png",
+            ],
+        ]
+        .concat(),
+        dir.path(),
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        image::image_dimensions(dir.path().join("a.png")).unwrap(),
+        (256, 192)
+    );
+
+    // Editing: the reference image sets the aspect ratio unless a size is given.
+    let out = mixel(
+        &[
+            &base[..],
+            &[
+                "--prompt",
+                "make the apple green",
+                "--ref-image",
+                "a.png",
+                "--width",
+                "256",
+                "--height",
+                "192",
+                "--output",
+                "b.png",
+            ],
+        ]
+        .concat(),
+        dir.path(),
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("Reference image: a.png"));
+    assert_eq!(
+        image::image_dimensions(dir.path().join("b.png")).unwrap(),
+        (256, 192)
+    );
+
+    // Z-Image-Turbo refuses reference images before loading anything.
+    let out = mixel(&["--prompt", "x", "--ref-image", "a.png"], dir.path());
+    assert!(!out.status.success());
+    assert!(text(&out.stderr).contains("does not take reference images"));
+    assert!(!text(&out.stdout).contains("Loading"));
+}

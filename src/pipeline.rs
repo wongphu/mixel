@@ -1,41 +1,110 @@
 //! The end-to-end text-to-image pipeline.
 
-use crate::zimage::{
-    scalar, scheduler::Scheduler, text_encoder::TextEncoder, transformer::Transformer, vae::Vae,
-    ModelFiles,
-};
-use anyhow::{Error as E, Result};
-use mlx_rs::{Array, Dtype};
+use crate::nn::ModelFiles;
+use crate::qwen21::pipeline::QwenPipeline;
+use crate::zimage::pipeline::ZImagePipeline;
+use anyhow::Result;
+use mlx_rs::Array;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
-use tokenizers::Tokenizer;
+use std::time::Duration;
 
-/// Hugging Face repo of the weights.
+/// Hugging Face repo of Z-Image-Turbo, the default model.
 pub const DEFAULT_REPO: &str = "Tongyi-MAI/Z-Image-Turbo";
 /// Denoising steps Z-Image-Turbo is tuned for.
 pub const DEFAULT_STEPS: usize = 9;
-/// Width and height must be multiples of this (VAE 8x * patch size 2).
+/// Z-Image-Turbo's size multiple (VAE 8x * patch size 2).
 pub const SIZE_ALIGN: usize = 16;
 
-/// Where to load the weights from, and on which device.
-#[derive(Debug, Clone)]
+/// A supported text-to-image model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Model {
+    /// Z-Image-Turbo: fast (9 steps), text-to-image and img2img.
+    #[default]
+    ZImageTurbo,
+    /// Qwen-Image-2.1: slower (40 steps), text-to-image, img2img, and editing
+    /// with reference images.
+    QwenImage21,
+}
+
+impl Model {
+    pub const ALL: [Model; 2] = [Model::ZImageTurbo, Model::QwenImage21];
+
+    /// Short name, as used on the command line.
+    pub fn name(self) -> &'static str {
+        match self {
+            Model::ZImageTurbo => "z-image-turbo",
+            Model::QwenImage21 => "qwen-image-2.1",
+        }
+    }
+
+    /// Hugging Face repo of the weights.
+    pub fn repo(self) -> &'static str {
+        match self {
+            Model::ZImageTurbo => DEFAULT_REPO,
+            Model::QwenImage21 => crate::qwen21::REPO,
+        }
+    }
+
+    pub fn default_steps(self) -> usize {
+        match self {
+            Model::ZImageTurbo => DEFAULT_STEPS,
+            Model::QwenImage21 => crate::qwen21::DEFAULT_STEPS,
+        }
+    }
+
+    /// Default guidance scale. Guidance only runs with a negative prompt, and
+    /// Qwen-Image-2.1 is meant to be sampled without it (1.0).
+    pub fn default_guidance(self) -> f64 {
+        match self {
+            Model::ZImageTurbo => 5.0,
+            Model::QwenImage21 => 1.0,
+        }
+    }
+
+    /// Width and height must be multiples of this.
+    pub fn size_align(self) -> usize {
+        match self {
+            Model::ZImageTurbo => SIZE_ALIGN,
+            Model::QwenImage21 => crate::qwen21::SIZE_ALIGN,
+        }
+    }
+
+    /// Whether the model can be conditioned on reference images (editing).
+    pub fn supports_reference_images(self) -> bool {
+        matches!(self, Model::QwenImage21)
+    }
+}
+
+impl std::fmt::Display for Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl std::str::FromStr for Model {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Model::ALL
+            .into_iter()
+            .find(|m| m.name() == s)
+            .ok_or_else(|| {
+                let names: Vec<_> = Model::ALL.iter().map(|m| m.name()).collect();
+                anyhow::anyhow!("unknown model {s:?}; expected one of {}", names.join(", "))
+            })
+    }
+}
+
+/// Which model to load, from where, and on which device.
+#[derive(Debug, Clone, Default)]
 pub struct LoadOptions {
-    /// Hugging Face repo id, used when `model_path` is `None`.
-    pub repo: String,
-    /// A local copy of the repo (with `tokenizer/`, `text_encoder/`, ...).
+    pub model: Model,
+    /// Hugging Face repo id to use instead of the model's own.
+    pub repo: Option<String>,
+    /// A local copy of the repo, instead of the Hugging Face cache.
     pub model_path: Option<PathBuf>,
     /// Run on the CPU instead of the GPU.
     pub cpu: bool,
-}
-
-impl Default for LoadOptions {
-    fn default() -> Self {
-        Self {
-            repo: DEFAULT_REPO.into(),
-            model_path: None,
-            cpu: false,
-        }
-    }
 }
 
 /// What to generate.
@@ -57,6 +126,10 @@ pub struct GenerateOptions {
     /// denoising steps that run. 1.0 ignores the image's content entirely.
     /// Must be 1.0 without an `init_image`.
     pub strength: f64,
+    /// Images the result should be based on (editing), for models that
+    /// support it (Qwen-Image-2.1). Each is resized to about 1024x1024 px at
+    /// its own aspect ratio.
+    pub reference_images: Vec<image::RgbImage>,
 }
 
 impl std::fmt::Debug for GenerateOptions {
@@ -74,23 +147,37 @@ impl std::fmt::Debug for GenerateOptions {
                 &self.init_image.as_ref().map(|i| i.dimensions()),
             )
             .field("strength", &self.strength)
+            .field(
+                "reference_images",
+                &self
+                    .reference_images
+                    .iter()
+                    .map(|i| i.dimensions())
+                    .collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
 
 impl GenerateOptions {
-    /// 1024x1024, 9 steps, seed 0.
+    /// Z-Image-Turbo defaults: 1024x1024, 9 steps, seed 0.
     pub fn new(prompt: impl Into<String>) -> Self {
+        Self::for_model(Model::ZImageTurbo, prompt)
+    }
+
+    /// `model`'s defaults at 1024x1024, seed 0.
+    pub fn for_model(model: Model, prompt: impl Into<String>) -> Self {
         Self {
             prompt: prompt.into(),
             negative_prompt: String::new(),
             width: 1024,
             height: 1024,
-            num_steps: DEFAULT_STEPS,
-            guidance_scale: 5.0,
+            num_steps: model.default_steps(),
+            guidance_scale: model.default_guidance(),
             seed: 0,
             init_image: None,
             strength: 1.0,
+            reference_images: Vec::new(),
         }
     }
 
@@ -106,8 +193,14 @@ impl GenerateOptions {
         }
     }
 
-    pub fn validate(&self) -> Result<()> {
-        let a = SIZE_ALIGN;
+    /// Checks the options for `model`.
+    pub fn validate(&self, model: Model) -> Result<()> {
+        let a = model.size_align();
+        anyhow::ensure!(
+            self.reference_images.is_empty() || model.supports_reference_images(),
+            "{model} does not take reference images; use {}",
+            Model::QwenImage21
+        );
         anyhow::ensure!(!self.prompt.trim().is_empty(), "prompt is empty");
         anyhow::ensure!(self.num_steps > 0, "num_steps must be at least 1");
         match &self.init_image {
@@ -182,48 +275,35 @@ pub struct Generated {
 /// # anyhow::Ok(())
 /// ```
 pub struct Pipeline {
-    dtype: Dtype,
-    tokenizer: Tokenizer,
-    text_encoder: TextEncoder,
-    transformer: Transformer,
-    vae: Vae,
+    model: Model,
+    inner: Inner,
+}
+
+enum Inner {
+    ZImage(ZImagePipeline),
+    Qwen(Box<QwenPipeline>),
 }
 
 impl Pipeline {
-    /// Loads the tokenizer, text encoder, transformer and VAE (downloading the
-    /// ~33 GB of weights on first use).
+    /// Loads the model's weights (downloading them on first use).
     pub fn load(opts: &LoadOptions) -> Result<Self> {
         if opts.cpu {
             mlx_rs::Device::set_default(&mlx_rs::Device::cpu());
         }
-        let dtype = Dtype::Bfloat16;
-        let files = ModelFiles::new(&opts.repo, opts.model_path.as_deref())?;
-
-        let tokenizer =
-            Tokenizer::from_file(files.get("tokenizer/tokenizer.json")?).map_err(E::msg)?;
-        let te_files = (1..=3)
-            .map(|i| files.get(&format!("text_encoder/model-{i:05}-of-00003.safetensors")))
-            .collect::<Result<Vec<_>>>()?;
-        let text_encoder = TextEncoder::load(&te_files, dtype)?;
-        let tr_files = (1..=3)
-            .map(|i| {
-                files.get(&format!(
-                    "transformer/diffusion_pytorch_model-{i:05}-of-00003.safetensors"
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let transformer = Transformer::load(&tr_files, dtype)?;
-        let vae = Vae::load(files.get("vae/diffusion_pytorch_model.safetensors")?, dtype)?;
-        // Drop the buffers left over from converting f32 weights to bf16.
-        mlx_rs::memory::clear_cache()?;
-
+        let repo = opts.repo.as_deref().unwrap_or(opts.model.repo());
+        let files = ModelFiles::new(repo, opts.model_path.as_deref())?;
+        let inner = match opts.model {
+            Model::ZImageTurbo => Inner::ZImage(ZImagePipeline::load(&files)?),
+            Model::QwenImage21 => Inner::Qwen(Box::new(QwenPipeline::load(&files)?)),
+        };
         Ok(Self {
-            dtype,
-            tokenizer,
-            text_encoder,
-            transformer,
-            vae,
+            model: opts.model,
+            inner,
         })
+    }
+
+    pub fn model(&self) -> Model {
+        self.model
     }
 
     pub fn generate(&self, opts: &GenerateOptions) -> Result<Generated> {
@@ -236,126 +316,11 @@ impl Pipeline {
         opts: &GenerateOptions,
         mut on_progress: impl FnMut(Progress),
     ) -> Result<Generated> {
-        opts.validate()?;
-        let dtype = self.dtype;
-        let scalar = |v: f64| scalar(v as f32, dtype);
-
-        let started = Instant::now();
-        let cap_feats = self.encode_prompt(&opts.prompt, &mut on_progress)?;
-        let neg_cap_feats = if !opts.negative_prompt.is_empty() && opts.guidance_scale > 1.0 {
-            Some(self.encode_prompt(&opts.negative_prompt, &mut |_| {})?)
-        } else {
-            None
-        };
-
-        // latent = 2 * (image_size // 16): divisible by the patch size, and 8x VAE upsampling.
-        let shape = [1, 16, 2 * (opts.height / 16), 2 * (opts.width / 16)];
-        let noise = Array::from_slice(&seeded_noise(opts.seed, shape), &shape.map(|d| d as i32));
-        let encoded = Instant::now();
-
-        let mut scheduler = Scheduler::new(opts.num_steps);
-        let (mut latents, steps) = match &opts.init_image {
-            None => (noise.as_dtype(dtype)?, opts.num_steps),
-            Some(img) => {
-                let steps = scheduler.skip_for_strength(opts.strength);
-                let init = self.encode_image(img, opts.width, opts.height)?;
-                // Flow matching: x_sigma = sigma * noise + (1 - sigma) * x_0.
-                // At strength 1, sigma is exactly 1 and this is plain noise.
-                let sigma = scheduler.current_sigma() as f32;
-                let x = noise.multiply(Array::from_f32(sigma))?.add(
-                    init.as_dtype(Dtype::Float32)?
-                        .multiply(Array::from_f32(1.0 - sigma))?,
-                )?;
-                (x.as_dtype(dtype)?, steps)
-            }
-        };
-        let image_encoded = Instant::now();
-
-        for step in 0..steps {
-            let t = scheduler.current_timestep_normalized();
-            let mut pred = self.transformer.forward(&latents, t as f32, &cap_feats)?;
-            if let Some(neg) = &neg_cap_feats {
-                // CFG: pred = neg + scale * (pos - neg)
-                let neg_pred = self.transformer.forward(&latents, t as f32, neg)?;
-                pred = neg_pred.add(
-                    pred.subtract(&neg_pred)?
-                        .multiply(scalar(opts.guidance_scale)?)?,
-                )?;
-            }
-            // Z-Image predicts the negated velocity; Euler step: x + dt * v.
-            let dt = scheduler.step_dt();
-            latents = latents.add(pred.negative()?.multiply(scalar(dt)?)?)?;
-            latents.eval()?;
-            on_progress(Progress::Step {
-                step: step + 1,
-                total: steps,
-                t,
-                sigma: scheduler.current_sigma(),
-            });
+        opts.validate(self.model)?;
+        match &self.inner {
+            Inner::ZImage(p) => p.generate_with(opts, &mut on_progress),
+            Inner::Qwen(p) => p.generate_with(opts, &mut on_progress),
         }
-
-        let denoised = Instant::now();
-        on_progress(Progress::Decoding);
-        let image = self.vae.decode(&latents.transpose_axes(&[0, 2, 3, 1])?)?;
-        // [-1, 1] -> [0, 255], computed in the model dtype like candle.
-        let image = mlx_rs::ops::clip(&image, (-1.0f32, 1.0f32))?
-            .add(scalar(1.0)?)?
-            .multiply(scalar(127.5)?)?
-            .as_dtype(Dtype::Uint8)?;
-        let image = to_rgb_image(&image)?;
-        // MLX keeps freed buffers for reuse. Between images (often of different
-        // sizes) they only pile up: in a mixed-size batch the cache grew to
-        // ~75 GB and steps slowed ~1.5x under memory pressure.
-        mlx_rs::memory::clear_cache()?;
-
-        Ok(Generated {
-            image,
-            timings: Timings {
-                text: encoded - started,
-                init_image: image_encoded - encoded,
-                denoise: denoised - image_encoded,
-                vae: denoised.elapsed(),
-            },
-        })
-    }
-
-    /// RGB image -> (1, 16, H/8, W/8) latents, resized to `width` x `height`.
-    fn encode_image(&self, img: &image::RgbImage, width: usize, height: usize) -> Result<Array> {
-        let (w, h) = (width as u32, height as u32);
-        let resized;
-        let img = if img.dimensions() == (w, h) {
-            img
-        } else {
-            resized = image::DynamicImage::ImageRgb8(img.clone())
-                .resize_to_fill(w, h, image::imageops::FilterType::Lanczos3)
-                .to_rgb8();
-            &resized
-        };
-        // [0, 255] -> [-1, 1], NHWC.
-        let pixels: Vec<f32> = img
-            .as_raw()
-            .iter()
-            .map(|&p| p as f32 / 127.5 - 1.0)
-            .collect();
-        let x = Array::from_slice(&pixels, &[1, h as i32, w as i32, 3]).as_dtype(self.dtype)?;
-        let z = self.vae.encode(&x)?.transpose_axes(&[0, 3, 1, 2])?;
-        z.eval()?;
-        Ok(z)
-    }
-
-    fn encode_prompt(&self, prompt: &str, on_progress: &mut impl FnMut(Progress)) -> Result<Array> {
-        let tokens = self
-            .tokenizer
-            .encode(format_prompt_for_qwen3(prompt).as_str(), true)
-            .map_err(E::msg)?
-            .get_ids()
-            .to_vec();
-        on_progress(Progress::Encoded {
-            tokens: tokens.len(),
-        });
-        let feats = self.text_encoder.forward(&tokens)?;
-        feats.eval()?;
-        Ok(feats)
     }
 }
 
@@ -371,14 +336,18 @@ pub fn seeded_noise(seed: u64, shape: [usize; 4]) -> Vec<f32> {
         .collect()
 }
 
-/// Qwen3 chat template (add_generation_prompt=True, enable_thinking=True):
-/// `<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n`
-fn format_prompt_for_qwen3(prompt: &str) -> String {
-    format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
+/// Resizes to exactly `w` x `h`, center-cropping to keep the aspect ratio.
+pub(crate) fn resize_to_fill(img: &image::RgbImage, w: u32, h: u32) -> image::RgbImage {
+    if img.dimensions() == (w, h) {
+        return img.clone();
+    }
+    image::DynamicImage::ImageRgb8(img.clone())
+        .resize_to_fill(w, h, image::imageops::FilterType::Lanczos3)
+        .to_rgb8()
 }
 
 /// (1, H, W, 3) u8 array -> RgbImage.
-fn to_rgb_image(img: &Array) -> Result<image::RgbImage> {
+pub(crate) fn to_rgb_image(img: &Array) -> Result<image::RgbImage> {
     let sh = img.shape();
     anyhow::ensure!(
         sh.len() == 4 && sh[0] == 1 && sh[3] == 3,
@@ -406,13 +375,16 @@ mod tests {
     #[test]
     fn validate_accepts_multiples_of_16() {
         for (w, h) in [(1024, 1024), (512, 512), (384, 512), (640, 368), (16, 16)] {
-            opts(w, h).validate().unwrap();
+            opts(w, h).validate(Model::ZImageTurbo).unwrap();
         }
     }
 
     #[test]
     fn validate_rejects_bad_dimensions_with_suggestion() {
-        let err = opts(1000, 1024).validate().unwrap_err().to_string();
+        let err = opts(1000, 1024)
+            .validate(Model::ZImageTurbo)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("divisible by 16"), "{err}");
         assert!(err.contains("992x1024"), "{err}");
     }
@@ -422,14 +394,18 @@ mod tests {
         let mut o = opts(512, 512);
         o.prompt = "   ".into();
         assert!(o
-            .validate()
+            .validate(Model::ZImageTurbo)
             .unwrap_err()
             .to_string()
             .contains("prompt is empty"));
 
         let mut o = opts(512, 512);
         o.num_steps = 0;
-        assert!(o.validate().unwrap_err().to_string().contains("num_steps"));
+        assert!(o
+            .validate(Model::ZImageTurbo)
+            .unwrap_err()
+            .to_string()
+            .contains("num_steps"));
     }
 
     #[test]
@@ -461,14 +437,6 @@ mod tests {
     }
 
     #[test]
-    fn prompt_uses_qwen3_chat_template() {
-        assert_eq!(
-            format_prompt_for_qwen3("hi"),
-            "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n"
-        );
-    }
-
-    #[test]
     fn to_rgb_image_checks_shape_and_copies_pixels() {
         let px: Vec<u8> = (0..2 * 3 * 3).map(|i| i as u8).collect();
         let a = Array::from_slice(&px, &[1, 2, 3, 3]);
@@ -476,5 +444,35 @@ mod tests {
         assert_eq!(img.dimensions(), (3, 2));
         assert_eq!(img.get_pixel(1, 0).0, [3, 4, 5]);
         assert!(to_rgb_image(&Array::from_slice(&px, &[2, 3, 3])).is_err());
+    }
+
+    #[test]
+    fn models_have_their_own_defaults_and_names() {
+        let q = GenerateOptions::for_model(Model::QwenImage21, "x");
+        assert_eq!((q.num_steps, q.guidance_scale), (40, 1.0));
+        assert_eq!(GenerateOptions::new("x").num_steps, 9);
+        for m in Model::ALL {
+            assert_eq!(m.name().parse::<Model>().unwrap(), m);
+        }
+        assert!("sdxl".parse::<Model>().is_err());
+        assert_eq!(Model::default(), Model::ZImageTurbo);
+    }
+
+    #[test]
+    fn validate_checks_model_specific_rules() {
+        // Qwen-Image-2.1 needs multiples of 32; Z-Image-Turbo only 16.
+        let o = opts(1008, 1024);
+        o.validate(Model::ZImageTurbo).unwrap();
+        assert!(o
+            .validate(Model::QwenImage21)
+            .unwrap_err()
+            .to_string()
+            .contains("divisible by 32"));
+        // Reference images only for models that support them.
+        let mut o = opts(1024, 1024);
+        o.reference_images.push(image::RgbImage::new(64, 64));
+        o.validate(Model::QwenImage21).unwrap();
+        let err = o.validate(Model::ZImageTurbo).unwrap_err().to_string();
+        assert!(err.contains("does not take reference images"), "{err}");
     }
 }
