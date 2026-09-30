@@ -67,7 +67,7 @@ Apple M3 Max, same prompt and seed, weights already cached:
 | 1024×1024 image | ~127 s | **68 s** |
 | 1024×1024: denoising | ~10.3 s/step | **7.4 s/step** |
 | 1024×1024: VAE decode | ~35 s | **1.8 s** |
-| Peak memory, 1024×1024 | 81 GB | **42 GB** |
+| Peak memory, 1024×1024 | 81 GB | **39 GB** |
 
 candy's phase split is measured from its log timestamps (candle queues GPU work
 asynchronously, so treat it as approximate). The VAE gap matches MLX's much faster 3×3

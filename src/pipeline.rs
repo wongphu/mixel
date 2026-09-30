@@ -157,6 +157,8 @@ impl Pipeline {
             .collect::<Result<Vec<_>>>()?;
         let transformer = Transformer::load(&tr_files, dtype)?;
         let vae = Decoder::load(files.get("vae/diffusion_pytorch_model.safetensors")?, dtype)?;
+        // Drop the buffers left over from converting f32 weights to bf16.
+        mlx_rs::memory::clear_cache()?;
 
         Ok(Self {
             dtype,
@@ -228,6 +230,10 @@ impl Pipeline {
             .multiply(scalar(127.5)?)?
             .as_dtype(Dtype::Uint8)?;
         let image = to_rgb_image(&image)?;
+        // MLX keeps freed buffers for reuse. Between images (often of different
+        // sizes) they only pile up: in a mixed-size batch the cache grew to
+        // ~75 GB and steps slowed ~1.5x under memory pressure.
+        mlx_rs::memory::clear_cache()?;
 
         Ok(Generated {
             image,
