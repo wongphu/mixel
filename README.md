@@ -17,6 +17,29 @@ mixel --prompt "A cute robot holding a candle" --width 1024 --height 1024 --seed
 - Width/height must be divisible by 16. Default steps: 9. `--model-path <dir>` uses local weights.
 - Each run prints a timing breakdown: text encoding, denoising, VAE.
 
+## As a library
+
+```toml
+[dependencies]
+mixel = { git = "https://github.com/wongphu/mixel" }
+```
+
+```rust
+use mixel::{GenerateOptions, LoadOptions, Pipeline, Progress};
+
+let pipeline = Pipeline::load(&LoadOptions::default())?; // load once, reuse
+let opts = GenerateOptions { seed: 42, width: 768, ..GenerateOptions::new("a red fox in fresh snow") };
+let out = pipeline.generate_with(&opts, |p| {
+    if let Progress::Step { step, total, .. } = p { eprintln!("step {step}/{total}") }
+})?;
+out.image.save("fox.png")?;          // image::RgbImage
+println!("{:?}", out.timings);       // text / denoise / vae durations
+```
+
+The library prints nothing and never writes files; the `mixel` command adds the CLI,
+JSONL batching, seed-in-filename naming and saving. The model itself is in `mixel::zimage`
+for lower-level use.
+
 ## Batch mode (JSONL)
 
 ```bash

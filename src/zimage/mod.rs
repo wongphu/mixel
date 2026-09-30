@@ -107,7 +107,7 @@ pub struct ModelFiles {
 }
 
 impl ModelFiles {
-    pub fn new(repo_id: &str, local: Option<&str>) -> Result<Self> {
+    pub fn new(repo_id: &str, local: Option<&Path>) -> Result<Self> {
         Ok(match local {
             Some(dir) => Self {
                 local: Some(dir.into()),

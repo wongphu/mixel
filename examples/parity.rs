@@ -7,14 +7,11 @@
 //! cargo run --release --example parity -- [latent_size]   # default 128 (1024x1024)
 //! ```
 
-#[path = "../src/zimage/mod.rs"]
-#[allow(dead_code)]
-mod zimage;
-
 use anyhow::{Error as E, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::z_image as cz;
+use mixel::zimage;
 use mlx_rs::{Array, Dtype};
 
 fn c_to_vec(t: &Tensor) -> Result<Vec<f32>> {
@@ -46,7 +43,7 @@ fn main() -> Result<()> {
         .map(|s| s.parse())
         .transpose()?
         .unwrap_or(128);
-    let files = zimage::ModelFiles::new("Tongyi-MAI/Z-Image-Turbo", None)?;
+    let files = zimage::ModelFiles::new(mixel::DEFAULT_REPO, None)?;
     let dev = Device::new_metal(0)?;
     let prompt = "<|im_start|>user\nA cute robot holding a candle in a cozy workshop, digital art<|im_end|>\n<|im_start|>assistant\n";
     let tokenizer =
