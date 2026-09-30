@@ -85,7 +85,13 @@ fn help_documents_batch_mode() {
     let out = mixel(&["--help"], Path::new("."));
     let stdout = text(&out.stdout);
     assert!(out.status.success());
-    for flag in ["--input", "--output-dir", "--overwrite", "--seed"] {
+    for flag in [
+        "--input",
+        "--output-dir",
+        "--overwrite",
+        "--seed",
+        "USAGE GUIDE",
+    ] {
         assert!(stdout.contains(flag), "missing {flag}");
     }
 }

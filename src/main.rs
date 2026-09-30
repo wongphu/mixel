@@ -33,8 +33,73 @@ impl ModelArg {
     }
 }
 
+/// Shown after the options by `mixel --help` (not `-h`): a usage guide for
+/// scripts and AI agents.
+const GUIDE: &str = "\
+USAGE GUIDE (for scripts and AI agents)
+
+Choosing a model:
+  z-image-turbo (default)  Fast: ~70 s for 1024x1024 on an M3 Max. Use for
+                           text-to-image and img2img.
+  qwen-image-2.1           ~7 min for 1024x1024. Use only to edit existing
+                           images (--ref-image). Its weights are for
+                           research, not commercial use.
+
+Recipes:
+  Text to image:
+    mixel --prompt \"a red fox in snow\" --seed 1 --output fox.png
+  Edit a photo (keeps its content, changes what the prompt says):
+    mixel --model qwen-image-2.1 --ref-image in.png \\
+          --prompt \"make it night\" --seed 1 --output night.png
+  Variation of an image (img2img; lower --strength = closer to it):
+    mixel --init-image in.png --strength 0.7 --prompt \"...\" --seed 1 --output v.png
+  Many images (loads the model once; much faster than a loop):
+    mixel --input jobs.jsonl --output-dir out --seed 1
+
+Batch file (--input): one JSON object per line.
+  {\"id\": \"fox\", \"prompt\": \"a red fox in snow\"}
+  {\"id\": \"cat\", \"prompt\": \"a cat\", \"width\": 768, \"height\": 512, \"seed\": 7}
+  {\"id\": \"night\", \"prompt\": \"make it night\", \"reference_images\": [\"in.png\"]}
+  Only prompt is required. Output file: output if given, else <id>.png,
+  else the line number (0003.png), under --output-dir. Other fields
+  (negative_prompt, width, height, num_steps, guidance_scale, seed,
+  init_image, strength, reference_images) default to the CLI flags. Image
+  paths in the file are relative to the file. ids/outputs must be unique.
+
+Where the image goes:
+  - Always pass --prompt: without it a default landscape prompt is used.
+  - Pass --seed for a predictable filename. Without it, a random seed is
+    appended: --output a.png writes a-<seed>.png.
+  - Parent directories are created. Single-image mode overwrites; batch mode
+    skips outputs that already exist (--overwrite to regenerate).
+  - Each saved image prints a line: \"Done! Image saved to <path> (<secs>s)\".
+  - Without --output: z_image_output.png or qwen_image_output.png.
+  - Use a .png or .jpg output name; other formats fail when saving.
+
+Sizes: width and height must be multiples of 16 (z-image-turbo) or 32
+(qwen-image-2.1); default 1024x1024, or follows --init-image / --ref-image.
+Smaller is faster: 512x512 takes ~14 s with z-image-turbo.
+
+Running it:
+  - Takes ~1 min (z-image-turbo) or ~7 min (qwen-image-2.1) per 1024x1024
+    image, plus model loading. The first run downloads
+    ~33 GB (z-image-turbo) or ~31 GB (qwen-image-2.1) to
+    ~/.cache/huggingface. Use long timeouts or run it in the background.
+  - Needs Apple Silicon and lots of memory: ~39 GB peak for z-image-turbo
+    at 1024x1024, ~55-70 GB for qwen-image-2.1. Run one mixel at a time.
+  - Arguments and every batch line are validated before the model loads,
+    so mistakes fail within a second.
+  - Exit status 0 on success; non-zero on invalid input, a failed image,
+    or any failed batch line (the others are still generated).
+  - Progress goes to stdout, errors to stderr.";
+
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(
+    author,
+    version,
+    about = "Text-to-image, img2img and image editing on Apple Silicon (MLX).",
+    after_long_help = GUIDE
+)]
 struct Args {
     /// The prompt to be used for image generation.
     #[arg(

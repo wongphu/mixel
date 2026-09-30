@@ -26,6 +26,17 @@ mixel --model qwen-image-2.1 --prompt "A capybara wearing a wizard hat, oil pain
   uses local weights.
 - Each run prints a timing breakdown: text encoding, init image, denoising, VAE.
 
+## For AI agents and scripts
+
+`mixel --help` ends with a usage guide written for agents: which model to pick, copy-paste
+recipes, the JSONL format, where output files go (and how to get predictable names),
+timings, memory, and exit codes. Rules of thumb:
+
+- Always pass `--prompt`, `--seed` and `--output` (or `id`s in JSONL) so the output path is known up front.
+- Generate several images with one `--input` JSONL run; the model loads once.
+- Allow minutes per image (more on the first run, which downloads the weights) and run one
+  `mixel` at a time: it needs 39–70 GB of memory.
+
 ## Editing with reference images (Qwen-Image-2.1)
 
 ```bash
