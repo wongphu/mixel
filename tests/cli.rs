@@ -133,3 +133,72 @@ fn generates_reproducible_image() {
         (320, 192)
     );
 }
+
+#[test]
+#[ignore = "needs the ~33 GB Z-Image-Turbo weights and a GPU; run with --ignored"]
+fn img2img_matches_text_to_image_at_full_strength_and_follows_image_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = ["--prompt", "a red apple", "--seed", "5", "--num-steps", "2"];
+    // Text-to-image reference at 256x256.
+    let out = mixel(
+        &[
+            &base[..],
+            &["--width", "256", "--height", "256", "--output", "t2i.png"],
+        ]
+        .concat(),
+        dir.path(),
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+
+    // Strength 1.0 ignores the init image's content: byte-identical output.
+    let out = mixel(
+        &[
+            &base[..],
+            &[
+                "--init-image",
+                "t2i.png",
+                "--strength",
+                "1.0",
+                "--output",
+                "i2i.png",
+            ],
+        ]
+        .concat(),
+        dir.path(),
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        std::fs::read(dir.path().join("t2i.png")).unwrap(),
+        std::fs::read(dir.path().join("i2i.png")).unwrap()
+    );
+
+    // Without --width/--height the output follows the init image (320x192).
+    image::RgbImage::from_pixel(320, 192, image::Rgb([90, 160, 220]))
+        .save(dir.path().join("wide.png"))
+        .unwrap();
+    let out = mixel(
+        &[
+            &base[..],
+            &[
+                "--init-image",
+                "wide.png",
+                "--strength",
+                "0.5",
+                "--output",
+                "wide-out.png",
+            ],
+        ]
+        .concat(),
+        dir.path(),
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("strength 0.5, 1 of 2 steps"),
+        "{}",
+        text(&out.stdout)
+    );
+    assert_eq!(
+        image::image_dimensions(dir.path().join("wide-out.png")).unwrap(),
+        (320, 192)
+    );
+}

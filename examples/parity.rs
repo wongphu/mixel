@@ -8,7 +8,7 @@
 //! ```
 
 use anyhow::{Error as E, Result};
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Device, Module, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::z_image as cz;
 use mixel::zimage;
@@ -111,18 +111,37 @@ fn main() -> Result<()> {
     // ---- VAE decode of the same latents (mlx NHWC vs candle NCHW)
     let vae_file = files.get("vae/diffusion_pytorch_model.safetensors")?;
     let m_img = {
-        let vae = zimage::vae::Decoder::load(&vae_file, Dtype::Bfloat16)?;
+        let vae = zimage::vae::Vae::load(&vae_file, Dtype::Bfloat16)?;
         let z = Array::from_slice(&noise, &shape.map(|d| d as i32))
             .as_dtype(Dtype::Bfloat16)?
             .transpose_axes(&[0, 2, 3, 1])?;
         m_to_vec(&vae.decode(&z)?)?
     };
     let c_img = {
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[vae_file], DType::BF16, &dev)? };
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[&vae_file], DType::BF16, &dev)? };
         let vae = cz::AutoEncoderKL::new(&cz::VaeConfig::z_image(), vb)?;
         let z = Tensor::from_vec(noise, &shape[..], &dev)?.to_dtype(DType::BF16)?;
         c_to_vec(&vae.decode(&z)?.permute((0, 2, 3, 1))?.contiguous()?)?
     };
     rel_err("VAE decode", &m_img, &c_img);
+
+    // ---- VAE encoder (img2img) on the decoded image, clamped to [-1, 1]
+    let img: Vec<f32> = c_img.iter().map(|v| v.clamp(-1.0, 1.0)).collect();
+    let (h, w) = (latent as i32 * 8, latent as i32 * 8);
+    let m_moments = {
+        let vae = zimage::vae::Vae::load(&vae_file, Dtype::Bfloat16)?;
+        let x = Array::from_slice(&img, &[1, h, w, 3]).as_dtype(Dtype::Bfloat16)?;
+        m_to_vec(&vae.encoder_moments(&x)?)?
+    };
+    let c_moments = {
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[&vae_file], DType::BF16, &dev)? };
+        let enc = cz::vae::Encoder::new(&cz::VaeConfig::z_image(), vb.pp("encoder"))?;
+        let x = Tensor::from_vec(img, (1, h as usize, w as usize, 3), &dev)?
+            .permute((0, 3, 1, 2))?
+            .contiguous()?
+            .to_dtype(DType::BF16)?;
+        c_to_vec(&enc.forward(&x)?.permute((0, 2, 3, 1))?.contiguous()?)?
+    };
+    rel_err("VAE encode", &m_moments, &c_moments);
     Ok(())
 }

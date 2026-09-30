@@ -36,6 +36,14 @@ impl Scheduler {
         }
     }
 
+    /// For img2img: skips the steps a `strength` in (0, 1] leaves out, like
+    /// diffusers' `get_timesteps`. Returns how many steps remain to run.
+    pub fn skip_for_strength(&mut self, strength: f64) -> usize {
+        let n = self.timesteps.len();
+        self.step_index = start_index(n, strength);
+        n - self.step_index
+    }
+
     /// Model input time in [0, 1]: (1000 - t) / 1000.
     pub fn current_timestep_normalized(&self) -> f64 {
         (NUM_TRAIN_TIMESTEPS - self.timesteps[self.step_index]) / NUM_TRAIN_TIMESTEPS
@@ -51,6 +59,12 @@ impl Scheduler {
         self.step_index += 1;
         dt
     }
+}
+
+/// First step index for img2img: `int(n - min(n * strength, n))`.
+pub fn start_index(num_steps: usize, strength: f64) -> usize {
+    let n = num_steps as f64;
+    (n - (n * strength).min(n)).max(0.0) as usize
 }
 
 #[cfg(test)]
@@ -82,5 +96,21 @@ mod tests {
                 sigmas_after[i]
             );
         }
+    }
+
+    #[test]
+    fn strength_skips_leading_steps_like_diffusers() {
+        assert_eq!(start_index(9, 1.0), 0);
+        assert_eq!(start_index(9, 0.6), 3); // int(9 - 5.4)
+        assert_eq!(start_index(9, 0.5), 4); // int(9 - 4.5)
+        assert_eq!(start_index(9, 0.1), 8); // int(9 - 0.9)
+        assert_eq!(start_index(9, 0.05), 8); // int(9 - 0.45)
+        assert_eq!(start_index(9, 1.5), 0);
+
+        let mut s = Scheduler::new(9);
+        assert_eq!(s.skip_for_strength(0.6), 6);
+        // Starts from the 4th sigma of the full schedule.
+        let full = Scheduler::new(9);
+        assert!((s.current_sigma() - full.sigmas[3]).abs() < 1e-12);
     }
 }

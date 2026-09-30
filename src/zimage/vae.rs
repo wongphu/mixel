@@ -1,10 +1,10 @@
-//! Z-Image VAE decoder (diffusers AutoencoderKL layout), ported from candle's
+//! Z-Image VAE (diffusers AutoencoderKL layout), ported from candle's
 //! `z_image::vae`. Runs in NHWC, MLX's native convolution layout.
 
 use super::{linear, scalar, silu, Weights};
 use anyhow::Result;
 use mlx_rs::fast::scaled_dot_product_attention;
-use mlx_rs::ops::{broadcast_to, conv2d};
+use mlx_rs::ops::{broadcast_to, conv2d, pad, split_at_indices};
 use mlx_rs::{Array, Dtype};
 use std::path::Path;
 
@@ -12,18 +12,55 @@ const SCALING_FACTOR: f32 = 0.3611;
 const SHIFT_FACTOR: f32 = 0.1159;
 const GROUPS: i32 = 32;
 const EPS: f32 = 1e-6;
-const NUM_UP_BLOCKS: usize = 4;
+const NUM_BLOCKS: usize = 4;
+const RESNETS_PER_DOWN_BLOCK: usize = 2;
 const RESNETS_PER_UP_BLOCK: usize = 3;
+const LATENT_CHANNELS: i32 = 16;
 
-pub struct Decoder {
+pub struct Vae {
     w: Weights,
     dtype: Dtype,
 }
 
-impl Decoder {
+impl Vae {
     pub fn load(file: impl AsRef<Path>, dtype: Dtype) -> Result<Self> {
-        let w = Weights::load(&[file], dtype, |name| name.starts_with("decoder."))?;
+        let w = Weights::load(&[file], dtype, |name| {
+            name.starts_with("decoder.") || name.starts_with("encoder.")
+        })?;
         Ok(Self { w, dtype })
+    }
+
+    /// Image (B, H, W, 3) in [-1, 1] -> latents (B, H/8, W/8, 16).
+    ///
+    /// Uses the mean of the latent distribution (no sampling), so encoding is
+    /// deterministic; candle's `AutoEncoderKL::encode` samples instead.
+    pub fn encode(&self, x: &Array) -> Result<Array> {
+        let moments = self.encoder_moments(x)?;
+        let mean = split_at_indices(&moments, &[LATENT_CHANNELS], -1)?.swap_remove(0);
+        Ok(mean
+            .subtract(scalar(SHIFT_FACTOR, self.dtype)?)?
+            .multiply(scalar(SCALING_FACTOR, self.dtype)?)?)
+    }
+
+    /// Raw encoder output (B, H/8, W/8, 32): latent mean and log-variance.
+    pub fn encoder_moments(&self, x: &Array) -> Result<Array> {
+        let mut h = self.conv(x, "encoder.conv_in", 1)?;
+        for i in 0..NUM_BLOCKS {
+            for j in 0..RESNETS_PER_DOWN_BLOCK {
+                h = self.resnet(&format!("encoder.down_blocks.{i}.resnets.{j}"), &h)?;
+            }
+            let down = format!("encoder.down_blocks.{i}.downsamplers.0.conv");
+            if self.w.has(&format!("{down}.weight")) {
+                // Pad right/bottom by 1, then a stride-2 conv without padding.
+                let padded = pad(&h, &[(0, 0), (0, 1), (0, 1), (0, 0)], None, None)?;
+                h = self.conv_strided(&padded, &down, 0, 2)?;
+            }
+        }
+        h = self.resnet("encoder.mid_block.resnets.0", &h)?;
+        h = self.attention("encoder.mid_block.attentions.0", &h)?;
+        h = self.resnet("encoder.mid_block.resnets.1", &h)?;
+        let h = silu(&self.group_norm(&h, "encoder.conv_norm_out")?)?;
+        self.conv(&h, "encoder.conv_out", 1)
     }
 
     /// Latents (B, H, W, 16) -> image (B, 8H, 8W, 3) in [-1, 1].
@@ -35,7 +72,7 @@ impl Decoder {
         h = self.resnet("decoder.mid_block.resnets.0", &h)?;
         h = self.attention("decoder.mid_block.attentions.0", &h)?;
         h = self.resnet("decoder.mid_block.resnets.1", &h)?;
-        for i in 0..NUM_UP_BLOCKS {
+        for i in 0..NUM_BLOCKS {
             for j in 0..RESNETS_PER_UP_BLOCK {
                 h = self.resnet(&format!("decoder.up_blocks.{i}.resnets.{j}"), &h)?;
             }
@@ -49,10 +86,14 @@ impl Decoder {
     }
 
     fn conv(&self, x: &Array, p: &str, padding: i32) -> Result<Array> {
+        self.conv_strided(x, p, padding, 1)
+    }
+
+    fn conv_strided(&self, x: &Array, p: &str, padding: i32, stride: i32) -> Result<Array> {
         let y = conv2d(
             x,
             self.w.get(&format!("{p}.weight"))?,
-            None,
+            (stride, stride),
             (padding, padding),
             None,
             None,

@@ -4,11 +4,14 @@
 //! ```bash
 //! mixel --prompt "A beautiful landscape with mountains" --seed 42
 //! mixel --input prompts.jsonl --output-dir out
+//! mixel --init-image photo.jpg --strength 0.6 --prompt "a watercolor painting"
 //! ```
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use mixel::{GenerateOptions, LoadOptions, Pipeline, Progress, DEFAULT_REPO, DEFAULT_STEPS};
+use mixel::{
+    GenerateOptions, LoadOptions, Pipeline, Progress, DEFAULT_REPO, DEFAULT_STEPS, SIZE_ALIGN,
+};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -51,13 +54,23 @@ struct Args {
     #[arg(long)]
     cpu: bool,
 
-    /// The height in pixels of the generated image.
-    #[arg(long, default_value_t = 1024)]
-    height: usize,
+    /// The height in pixels of the generated image [default: 1024, or from --init-image].
+    #[arg(long)]
+    height: Option<usize>,
 
-    /// The width in pixels of the generated image.
-    #[arg(long, default_value_t = 1024)]
-    width: usize,
+    /// The width in pixels of the generated image [default: 1024, or from --init-image].
+    #[arg(long)]
+    width: Option<usize>,
+
+    /// Start from this image (img2img). Without --width/--height, the output
+    /// keeps its aspect ratio, rounded to multiples of 16, longest side <= 1024.
+    #[arg(long)]
+    init_image: Option<PathBuf>,
+
+    /// With --init-image: how much to change it, in (0, 1]. Low keeps the
+    /// image close to the original; 1.0 ignores its content. [default: 0.6]
+    #[arg(long)]
+    strength: Option<f64>,
 
     /// Number of inference steps.
     #[arg(long)]
@@ -87,8 +100,9 @@ struct Args {
     /// JSONL file with one image per line, e.g.
     /// {"prompt": "a cat", "seed": 1, "width": 768, "output": "cat.png"}.
     /// Fields: prompt (required), negative_prompt, width, height, num_steps,
-    /// guidance_scale, seed, output. Omitted fields use the CLI values;
-    /// omitted output defaults to the line number, e.g. 0003.png.
+    /// guidance_scale, seed, output, init_image, strength. Omitted fields use
+    /// the CLI values; omitted output defaults to the line number, e.g.
+    /// 0003.png. Relative init_image paths are relative to the JSONL file.
     #[arg(long, short)]
     input: Option<PathBuf>,
 
@@ -113,6 +127,8 @@ struct Job {
     num_steps: usize,
     guidance_scale: f64,
     seed: u64,
+    init_image: Option<PathBuf>,
+    strength: f64,
     /// True when the seed was picked at random; it is then part of `output`.
     random_seed: bool,
     /// The output path before any random seed is appended.
@@ -132,11 +148,57 @@ struct JobSpec {
     guidance_scale: Option<f64>,
     seed: Option<u64>,
     output: Option<String>,
+    init_image: Option<String>,
+    strength: Option<f64>,
+}
+
+/// Default img2img strength: keeps the layout and colors, changes the rest.
+const DEFAULT_STRENGTH: f64 = 0.6;
+/// Longest side for sizes derived from an init image.
+const MAX_AUTO_SIDE: f64 = 1024.0;
+
+/// Rounds to the nearest multiple of 16, at least 16.
+fn round_to_align(x: f64) -> usize {
+    let a = SIZE_ALIGN as f64;
+    ((x / a).round() as usize).max(1) * SIZE_ALIGN
+}
+
+/// Output size: explicit values win; otherwise derived from the init image's
+/// aspect ratio (longest side capped at 1024); otherwise 1024x1024.
+fn resolve_size(
+    width: Option<usize>,
+    height: Option<usize>,
+    init_image: Option<&Path>,
+) -> Result<(usize, usize)> {
+    let Some(path) = init_image else {
+        return Ok((width.unwrap_or(1024), height.unwrap_or(1024)));
+    };
+    let (iw, ih) = image::image_dimensions(path)
+        .with_context(|| format!("reading init image {}", path.display()))?;
+    let (iw, ih) = (iw as f64, ih as f64);
+    Ok(match (width, height) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None) => (w, round_to_align(w as f64 * ih / iw)),
+        (None, Some(h)) => (round_to_align(h as f64 * iw / ih), h),
+        (None, None) => {
+            let scale = (MAX_AUTO_SIDE / iw.max(ih)).min(1.0);
+            (round_to_align(iw * scale), round_to_align(ih * scale))
+        }
+    })
 }
 
 impl Job {
-    fn options(&self) -> GenerateOptions {
-        GenerateOptions {
+    /// Library options for this job, loading the init image if there is one.
+    fn options(&self) -> Result<GenerateOptions> {
+        let init_image = match &self.init_image {
+            Some(p) => Some(
+                image::open(p)
+                    .with_context(|| format!("reading init image {}", p.display()))?
+                    .to_rgb8(),
+            ),
+            None => None,
+        };
+        Ok(GenerateOptions {
             prompt: self.prompt.clone(),
             negative_prompt: self.negative_prompt.clone(),
             width: self.width,
@@ -144,11 +206,24 @@ impl Job {
             num_steps: self.num_steps,
             guidance_scale: self.guidance_scale,
             seed: self.seed,
-        }
+            init_image,
+            strength: self.strength,
+        })
     }
 
     fn validate(&self) -> Result<()> {
-        self.options().validate()
+        self.options()?.validate()
+    }
+
+    /// Denoising steps that run (fewer than `num_steps` for img2img).
+    fn steps_to_run(&self) -> usize {
+        match self.init_image {
+            Some(_) => {
+                self.num_steps
+                    - mixel::zimage::scheduler::start_index(self.num_steps, self.strength)
+            }
+            None => self.num_steps,
+        }
     }
 
     /// Fills in the seed, picking a random one and appending it to the
@@ -218,21 +293,34 @@ fn seeded_path(path: &Path, seed: u64) -> PathBuf {
     path.with_file_name(name)
 }
 
-fn single_job(args: &Args) -> Job {
-    Job {
+/// Strength for a job: explicit, else the img2img default, else 1.0.
+fn resolve_strength(strength: Option<f64>, has_init_image: bool) -> f64 {
+    strength.unwrap_or(if has_init_image {
+        DEFAULT_STRENGTH
+    } else {
+        1.0
+    })
+}
+
+fn single_job(args: &Args) -> Result<Job> {
+    let init_image = args.init_image.clone();
+    let (width, height) = resolve_size(args.width, args.height, init_image.as_deref())?;
+    Ok(Job {
         line: 0,
         prompt: args.prompt.clone(),
         negative_prompt: args.negative_prompt.clone(),
-        width: args.width,
-        height: args.height,
+        width,
+        height,
         num_steps: args.num_steps.unwrap_or_else(|| args.model.default_steps()),
         guidance_scale: args.guidance_scale,
         seed: 0,
+        strength: resolve_strength(args.strength, init_image.is_some()),
+        init_image,
         random_seed: false,
         base_output: PathBuf::from(&args.output),
         output: PathBuf::from(&args.output),
     }
-    .with_seed(args.seed)
+    .with_seed(args.seed))
 }
 
 /// Parses and validates every line of a JSONL file, reporting all problems at once.
@@ -257,27 +345,46 @@ fn read_jobs(path: &Path, args: &Args) -> Result<Vec<Job>> {
         };
         let output = spec.output.unwrap_or_else(|| format!("{line_no:04}.png"));
         let seed = spec.seed.or(args.seed);
+        // Line paths are relative to the JSONL file; the CLI default to the cwd.
+        let init_image = match spec.init_image {
+            Some(p) => Some(path.parent().unwrap_or(Path::new(".")).join(p)),
+            None => args.init_image.clone(),
+        };
+        let size = resolve_size(
+            spec.width.or(args.width),
+            spec.height.or(args.height),
+            init_image.as_deref(),
+        );
+        let (width, height) = match size {
+            Ok(size) => size,
+            Err(e) => {
+                errors.push(format!("line {line_no}: {e:#}"));
+                continue;
+            }
+        };
         let job = Job {
             line: line_no,
             prompt: spec.prompt,
             negative_prompt: spec
                 .negative_prompt
                 .unwrap_or_else(|| args.negative_prompt.clone()),
-            width: spec.width.unwrap_or(args.width),
-            height: spec.height.unwrap_or(args.height),
+            width,
+            height,
             num_steps: spec
                 .num_steps
                 .or(args.num_steps)
                 .unwrap_or_else(|| args.model.default_steps()),
             guidance_scale: spec.guidance_scale.unwrap_or(args.guidance_scale),
             seed: 0,
+            strength: resolve_strength(spec.strength.or(args.strength), init_image.is_some()),
+            init_image,
             random_seed: false,
             base_output: args.output_dir.join(&output),
             output: args.output_dir.join(output),
         }
         .with_seed(seed);
         if let Err(e) = job.validate() {
-            errors.push(format!("line {line_no}: {e}"));
+            errors.push(format!("line {line_no}: {e:#}"));
             continue;
         }
         if let Some(prev) = seen_outputs.insert(job.base_output.clone(), line_no) {
@@ -306,7 +413,7 @@ fn run(args: Args) -> Result<()> {
     let jobs = match &args.input {
         Some(path) => read_jobs(path, &args)?,
         None => {
-            let job = single_job(&args);
+            let job = single_job(&args)?;
             job.validate()?;
             vec![job]
         }
@@ -363,6 +470,15 @@ fn run(args: Args) -> Result<()> {
         println!("Guidance scale: {}", job.guidance_scale);
         let kind = if job.random_seed { " (random)" } else { "" };
         println!("Seed: {}{kind}", job.seed);
+        if let Some(init) = &job.init_image {
+            println!(
+                "Init image: {} (strength {}, {} of {} steps)",
+                init.display(),
+                job.strength,
+                job.steps_to_run(),
+                job.num_steps
+            );
+        }
         if let Some(parent) = job.output.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -397,7 +513,7 @@ fn run(args: Args) -> Result<()> {
 
 /// Generates one job's image with progress output and saves it.
 fn generate(pipeline: &Pipeline, job: &Job) -> Result<()> {
-    let out = pipeline.generate_with(&job.options(), |p| match p {
+    let out = pipeline.generate_with(&job.options()?, |p| match p {
         Progress::Encoded { tokens } => println!("Token count: {tokens}"),
         Progress::Step {
             step,
@@ -409,10 +525,11 @@ fn generate(pipeline: &Pipeline, job: &Job) -> Result<()> {
     })?;
     let t = out.timings;
     println!(
-        "Timings: text {:.1}s, denoise {:.1}s ({:.1}s/step), VAE {:.1}s",
+        "Timings: text {:.1}s, init image {:.1}s, denoise {:.1}s ({:.1}s/step), VAE {:.1}s",
         t.text.as_secs_f64(),
+        t.init_image.as_secs_f64(),
         t.denoise.as_secs_f64(),
-        t.denoise.as_secs_f64() / job.num_steps as f64,
+        t.denoise.as_secs_f64() / job.steps_to_run().max(1) as f64,
         t.vae.as_secs_f64()
     );
     out.image
@@ -457,6 +574,8 @@ mod tests {
             num_steps: 9,
             guidance_scale: 5.0,
             seed: 0,
+            init_image: None,
+            strength: 1.0,
             random_seed: false,
             base_output: "out.png".into(),
             output: "out.png".into(),
@@ -487,7 +606,7 @@ mod tests {
 
     #[test]
     fn single_job_with_explicit_seed_keeps_output_name() {
-        let job = single_job(&args(&["--seed", "5", "--output", "x.png"]));
+        let job = single_job(&args(&["--seed", "5", "--output", "x.png"])).unwrap();
         assert_eq!(job.seed, 5);
         assert!(!job.random_seed);
         assert_eq!(job.output, PathBuf::from("x.png"));
@@ -495,7 +614,7 @@ mod tests {
 
     #[test]
     fn single_job_without_seed_appends_random_seed() {
-        let job = single_job(&args(&["--output", "x.png"]));
+        let job = single_job(&args(&["--output", "x.png"])).unwrap();
         assert!(job.random_seed);
         assert_eq!(job.output, PathBuf::from(format!("x-{}.png", job.seed)));
         assert_eq!(job.base_output, PathBuf::from("x.png"));
@@ -503,8 +622,11 @@ mod tests {
 
     #[test]
     fn single_job_uses_model_default_steps() {
-        assert_eq!(single_job(&args(&[])).num_steps, 9);
-        assert_eq!(single_job(&args(&["--num-steps", "4"])).num_steps, 4);
+        assert_eq!(single_job(&args(&[])).unwrap().num_steps, 9);
+        assert_eq!(
+            single_job(&args(&["--num-steps", "4"])).unwrap().num_steps,
+            4
+        );
     }
 
     // ---------- JSONL parsing ----------
@@ -692,6 +814,125 @@ not json
         let mut j = job(512, 512);
         j.base_output = PathBuf::from("/definitely/not/here/0001.png");
         assert_eq!(j.with_seed(None).existing_output(), None);
+    }
+
+    // ---------- img2img ----------
+
+    fn write_png(dir: &Path, name: &str, w: u32, h: u32) -> PathBuf {
+        let path = dir.join(name);
+        image::RgbImage::from_pixel(w, h, image::Rgb([200, 100, 50]))
+            .save(&path)
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn round_to_align_rounds_to_nearest_16() {
+        assert_eq!(round_to_align(1000.0), 1008);
+        assert_eq!(round_to_align(1024.0), 1024);
+        assert_eq!(round_to_align(575.9), 576);
+        assert_eq!(round_to_align(3.0), 16);
+    }
+
+    #[test]
+    fn resolve_size_without_image_defaults_to_1024() {
+        assert_eq!(resolve_size(None, None, None).unwrap(), (1024, 1024));
+        assert_eq!(resolve_size(Some(512), None, None).unwrap(), (512, 1024));
+    }
+
+    #[test]
+    fn resolve_size_follows_image_aspect_ratio() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = write_png(dir.path(), "wide.png", 400, 300);
+        // Small images keep their size (rounded), large ones are capped at 1024.
+        assert_eq!(resolve_size(None, None, Some(&img)).unwrap(), (400, 304));
+        let big = write_png(dir.path(), "big.png", 3000, 2000);
+        assert_eq!(resolve_size(None, None, Some(&big)).unwrap(), (1024, 688));
+        // One explicit side: the other follows the aspect ratio.
+        assert_eq!(
+            resolve_size(Some(800), None, Some(&img)).unwrap(),
+            (800, 608)
+        );
+        assert_eq!(
+            resolve_size(None, Some(600), Some(&img)).unwrap(),
+            (800, 600)
+        );
+        // Both explicit: used as-is (the image is cropped to fill).
+        assert_eq!(
+            resolve_size(Some(512), Some(512), Some(&img)).unwrap(),
+            (512, 512)
+        );
+    }
+
+    #[test]
+    fn resolve_size_reports_missing_image() {
+        let err = resolve_size(None, None, Some(Path::new("/no/such.png"))).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("reading init image /no/such.png"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn single_job_with_init_image_uses_default_strength_and_image_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = write_png(dir.path(), "in.png", 640, 480);
+        let job = single_job(&args(&[
+            "--init-image",
+            img.to_str().unwrap(),
+            "--seed",
+            "1",
+        ]))
+        .unwrap();
+        assert_eq!((job.width, job.height), (640, 480));
+        assert_eq!(job.strength, DEFAULT_STRENGTH);
+        assert_eq!(job.steps_to_run(), 6); // int(9 - 5.4) = 3 skipped
+        job.validate().unwrap();
+
+        let opts = job.options().unwrap();
+        assert_eq!(opts.init_image.unwrap().dimensions(), (640, 480));
+    }
+
+    #[test]
+    fn strength_without_init_image_is_rejected() {
+        let job = single_job(&args(&["--strength", "0.5", "--seed", "1"])).unwrap();
+        let err = job.validate().unwrap_err().to_string();
+        assert!(err.contains("needs an init image"), "{err}");
+    }
+
+    #[test]
+    fn read_jobs_resolves_init_images_relative_to_jsonl_and_checks_them() {
+        let dir = tempfile::tempdir().unwrap();
+        write_png(dir.path(), "a.png", 320, 320);
+        let input = write_jsonl(
+            dir.path(),
+            r#"{"prompt": "a", "seed": 1, "init_image": "a.png", "strength": 0.3}
+{"prompt": "b", "seed": 2, "init_image": "missing.png"}
+{"prompt": "c", "seed": 3, "init_image": "a.png", "strength": 1.5}
+"#,
+        );
+        // Run from another directory: paths must resolve against the JSONL file.
+        let err = read_jobs(&input, &batch_args(&input, &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("2 invalid line(s)"), "{err}");
+        assert!(err.contains("line 2: reading init image"), "{err}");
+        assert!(err.contains("line 3: strength must be in (0, 1]"), "{err}");
+
+        let ok = write_jsonl(
+            dir.path(),
+            r#"{"prompt": "a", "seed": 1, "init_image": "a.png", "strength": 0.3}"#,
+        );
+        let jobs = read_jobs(&ok, &batch_args(&ok, &[])).unwrap();
+        assert_eq!(
+            jobs[0].init_image.as_deref(),
+            Some(dir.path().join("a.png").as_path())
+        );
+        assert_eq!(
+            (jobs[0].width, jobs[0].height, jobs[0].strength),
+            (320, 320, 0.3)
+        );
+        assert_eq!(jobs[0].steps_to_run(), 3); // int(9 - 2.7) = 6 skipped
     }
 
     // ---------- CLI ----------

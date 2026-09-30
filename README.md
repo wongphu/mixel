@@ -17,6 +17,25 @@ mixel --prompt "A cute robot holding a candle" --width 1024 --height 1024 --seed
 - Width/height must be divisible by 16. Default steps: 9. `--model-path <dir>` uses local weights.
 - Each run prints a timing breakdown: text encoding, denoising, VAE.
 
+## Image to image
+
+Start from an existing image instead of pure noise:
+
+```bash
+mixel --init-image photo.jpg --prompt "A gray wolf sitting in fresh snow" --strength 0.75 --seed 7
+```
+
+- `--strength` in (0, 1] is the fraction of denoising steps that run (like diffusers):
+  with 9 steps, 0.6 runs 6 and 0.75 runs 7. Low values stay close to the image, 1.0
+  ignores its content and equals plain text-to-image with the same seed. Default 0.6.
+- Without `--width`/`--height`, the output keeps the image's aspect ratio (multiples of 16,
+  longest side at most 1024). With explicit sizes, the image is center-cropped to fill.
+- JSONL lines take `init_image` (relative to the JSONL file) and `strength`.
+- **Content vs style.** Changing *what* is in the picture (fox to wolf) works at 0.6 to 0.8
+  and keeps pose and framing. Changing a photo's *style* (to watercolor) needs a start
+  closer to pure noise; with 9 steps the finest option skips a whole step, so use more:
+  `--num-steps 20 --strength 0.95` gives a watercolor with the original composition.
+
 ## As a library
 
 ```toml
@@ -33,6 +52,10 @@ let out = pipeline.generate_with(&opts, |p| {
     if let Progress::Step { step, total, .. } = p { eprintln!("step {step}/{total}") }
 })?;
 out.image.save("fox.png")?;          // image::RgbImage
+
+// img2img: set init_image and strength
+let photo = image::open("photo.jpg")?.to_rgb8();
+let edit = GenerateOptions { init_image: Some(photo), strength: 0.75, ..opts };
 println!("{:?}", out.timings);       // text / denoise / vae durations
 ```
 
@@ -75,7 +98,8 @@ convolutions (see [mlx-vs-candle](https://github.com/wongphu/mlx-vs-candle)).
 
 **Output parity.** `cargo run --release --example parity -- 128` runs each stage of both
 implementations on identical inputs. Relative L2 error at 1024×1024: text encoder 0.9%,
-transformer (one step) 1.7%, VAE 2.5%, which is bf16 rounding noise. Final images use the
+transformer (one step) 1.7%, VAE decode 2.5%, VAE encode 1.5% (at 512×512), which is bf16
+rounding noise. Final images use the
 same seeded noise and match closely at 512×512 (PSNR 32.5 dB); at 1024×1024 the small
 per-step differences compound, so the composition matches but fine details can differ.
 

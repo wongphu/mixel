@@ -1,8 +1,8 @@
 //! The end-to-end text-to-image pipeline.
 
 use crate::zimage::{
-    scalar, scheduler::Scheduler, text_encoder::TextEncoder, transformer::Transformer,
-    vae::Decoder, ModelFiles,
+    scalar, scheduler::Scheduler, text_encoder::TextEncoder, transformer::Transformer, vae::Vae,
+    ModelFiles,
 };
 use anyhow::{Error as E, Result};
 use mlx_rs::{Array, Dtype};
@@ -39,7 +39,7 @@ impl Default for LoadOptions {
 }
 
 /// What to generate.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct GenerateOptions {
     pub prompt: String,
     /// Used for classifier-free guidance when non-empty and `guidance_scale > 1`.
@@ -50,6 +50,32 @@ pub struct GenerateOptions {
     pub guidance_scale: f64,
     /// Seeds the initial noise; the same seed and options give the same image.
     pub seed: u64,
+    /// Start from this image instead of pure noise (img2img). It is resized
+    /// (center-cropped to fill) to `width` x `height` if needed.
+    pub init_image: Option<image::RgbImage>,
+    /// How much of `init_image` to replace, in (0, 1]: the fraction of the
+    /// denoising steps that run. 1.0 ignores the image's content entirely.
+    /// Must be 1.0 without an `init_image`.
+    pub strength: f64,
+}
+
+impl std::fmt::Debug for GenerateOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GenerateOptions")
+            .field("prompt", &self.prompt)
+            .field("negative_prompt", &self.negative_prompt)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("num_steps", &self.num_steps)
+            .field("guidance_scale", &self.guidance_scale)
+            .field("seed", &self.seed)
+            .field(
+                "init_image",
+                &self.init_image.as_ref().map(|i| i.dimensions()),
+            )
+            .field("strength", &self.strength)
+            .finish()
+    }
 }
 
 impl GenerateOptions {
@@ -63,6 +89,20 @@ impl GenerateOptions {
             num_steps: DEFAULT_STEPS,
             guidance_scale: 5.0,
             seed: 0,
+            init_image: None,
+            strength: 1.0,
+        }
+    }
+
+    /// Denoising steps that actually run: all of them for text-to-image,
+    /// fewer for img2img with `strength < 1`.
+    pub fn steps_to_run(&self) -> usize {
+        match self.init_image {
+            Some(_) => {
+                self.num_steps
+                    - crate::zimage::scheduler::start_index(self.num_steps, self.strength)
+            }
+            None => self.num_steps,
         }
     }
 
@@ -70,6 +110,21 @@ impl GenerateOptions {
         let a = SIZE_ALIGN;
         anyhow::ensure!(!self.prompt.trim().is_empty(), "prompt is empty");
         anyhow::ensure!(self.num_steps > 0, "num_steps must be at least 1");
+        match &self.init_image {
+            Some(img) => {
+                anyhow::ensure!(
+                    self.strength > 0.0 && self.strength <= 1.0,
+                    "strength must be in (0, 1], got {}",
+                    self.strength
+                );
+                anyhow::ensure!(img.width() > 0 && img.height() > 0, "init image is empty");
+            }
+            None => anyhow::ensure!(
+                self.strength == 1.0,
+                "strength {} needs an init image",
+                self.strength
+            ),
+        }
         if !self.height.is_multiple_of(a) || !self.width.is_multiple_of(a) {
             anyhow::bail!(
                 "Image dimensions must be divisible by {a}. Got {}x{}. Try {}x{} or {}x{} instead.",
@@ -105,6 +160,8 @@ pub enum Progress {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Timings {
     pub text: Duration,
+    /// Encoding the init image with the VAE (zero for text-to-image).
+    pub init_image: Duration,
     pub denoise: Duration,
     pub vae: Duration,
 }
@@ -129,7 +186,7 @@ pub struct Pipeline {
     tokenizer: Tokenizer,
     text_encoder: TextEncoder,
     transformer: Transformer,
-    vae: Decoder,
+    vae: Vae,
 }
 
 impl Pipeline {
@@ -156,7 +213,7 @@ impl Pipeline {
             })
             .collect::<Result<Vec<_>>>()?;
         let transformer = Transformer::load(&tr_files, dtype)?;
-        let vae = Decoder::load(files.get("vae/diffusion_pytorch_model.safetensors")?, dtype)?;
+        let vae = Vae::load(files.get("vae/diffusion_pytorch_model.safetensors")?, dtype)?;
         // Drop the buffers left over from converting f32 weights to bf16.
         mlx_rs::memory::clear_cache()?;
 
@@ -193,12 +250,28 @@ impl Pipeline {
 
         // latent = 2 * (image_size // 16): divisible by the patch size, and 8x VAE upsampling.
         let shape = [1, 16, 2 * (opts.height / 16), 2 * (opts.width / 16)];
-        let noise = seeded_noise(opts.seed, shape);
-        let mut latents = Array::from_slice(&noise, &shape.map(|d| d as i32)).as_dtype(dtype)?;
-
+        let noise = Array::from_slice(&seeded_noise(opts.seed, shape), &shape.map(|d| d as i32));
         let encoded = Instant::now();
+
         let mut scheduler = Scheduler::new(opts.num_steps);
-        for step in 0..opts.num_steps {
+        let (mut latents, steps) = match &opts.init_image {
+            None => (noise.as_dtype(dtype)?, opts.num_steps),
+            Some(img) => {
+                let steps = scheduler.skip_for_strength(opts.strength);
+                let init = self.encode_image(img, opts.width, opts.height)?;
+                // Flow matching: x_sigma = sigma * noise + (1 - sigma) * x_0.
+                // At strength 1, sigma is exactly 1 and this is plain noise.
+                let sigma = scheduler.current_sigma() as f32;
+                let x = noise.multiply(Array::from_f32(sigma))?.add(
+                    init.as_dtype(Dtype::Float32)?
+                        .multiply(Array::from_f32(1.0 - sigma))?,
+                )?;
+                (x.as_dtype(dtype)?, steps)
+            }
+        };
+        let image_encoded = Instant::now();
+
+        for step in 0..steps {
             let t = scheduler.current_timestep_normalized();
             let mut pred = self.transformer.forward(&latents, t as f32, &cap_feats)?;
             if let Some(neg) = &neg_cap_feats {
@@ -215,7 +288,7 @@ impl Pipeline {
             latents.eval()?;
             on_progress(Progress::Step {
                 step: step + 1,
-                total: opts.num_steps,
+                total: steps,
                 t,
                 sigma: scheduler.current_sigma(),
             });
@@ -239,10 +312,35 @@ impl Pipeline {
             image,
             timings: Timings {
                 text: encoded - started,
-                denoise: denoised - encoded,
+                init_image: image_encoded - encoded,
+                denoise: denoised - image_encoded,
                 vae: denoised.elapsed(),
             },
         })
+    }
+
+    /// RGB image -> (1, 16, H/8, W/8) latents, resized to `width` x `height`.
+    fn encode_image(&self, img: &image::RgbImage, width: usize, height: usize) -> Result<Array> {
+        let (w, h) = (width as u32, height as u32);
+        let resized;
+        let img = if img.dimensions() == (w, h) {
+            img
+        } else {
+            resized = image::DynamicImage::ImageRgb8(img.clone())
+                .resize_to_fill(w, h, image::imageops::FilterType::Lanczos3)
+                .to_rgb8();
+            &resized
+        };
+        // [0, 255] -> [-1, 1], NHWC.
+        let pixels: Vec<f32> = img
+            .as_raw()
+            .iter()
+            .map(|&p| p as f32 / 127.5 - 1.0)
+            .collect();
+        let x = Array::from_slice(&pixels, &[1, h as i32, w as i32, 3]).as_dtype(self.dtype)?;
+        let z = self.vae.encode(&x)?.transpose_axes(&[0, 3, 1, 2])?;
+        z.eval()?;
+        Ok(z)
     }
 
     fn encode_prompt(&self, prompt: &str, on_progress: &mut impl FnMut(Progress)) -> Result<Array> {
