@@ -66,7 +66,9 @@ impl ZImagePipeline {
 
         let started = Instant::now();
         let cap_feats = self.encode_prompt(&opts.prompt, on_progress)?;
-        let neg_cap_feats = if !opts.negative_prompt.is_empty() && opts.guidance_scale > 1.0 {
+        // Like diffusers, guidance runs whenever the scale is positive, against
+        // the negative prompt or, without one, the empty prompt.
+        let neg_cap_feats = if opts.guidance_scale > 0.0 {
             Some(self.encode_prompt(&opts.negative_prompt, &mut |_| {})?)
         } else {
             None
@@ -104,15 +106,11 @@ impl ZImagePipeline {
                 .forward(&x, t, &cap_feats)?
                 .as_dtype(Dtype::Float32)?;
             if let Some(neg) = &neg_cap_feats {
-                // CFG: pred = neg + scale * (pos - neg)
                 let neg_pred = self
                     .transformer
                     .forward(&x, t, neg)?
                     .as_dtype(Dtype::Float32)?;
-                pred = neg_pred.add(
-                    pred.subtract(&neg_pred)?
-                        .multiply(Array::from_f32(opts.guidance_scale as f32))?,
-                )?;
+                pred = guide(&pred, &neg_pred, opts.guidance_scale as f32)?;
             }
             // Z-Image predicts the negated velocity; Euler step: x + dt * v.
             let dt = scheduler.step_dt();
@@ -184,9 +182,15 @@ impl ZImagePipeline {
     }
 }
 
+/// Classifier-free guidance as diffusers' `ZImagePipeline` does it:
+/// `pos + scale * (pos - neg)`, so 0 is no guidance.
+pub fn guide(pos: &Array, neg: &Array, scale: f32) -> Result<Array> {
+    Ok(pos.add(pos.subtract(neg)?.multiply(Array::from_f32(scale))?)?)
+}
+
 /// Qwen3 chat template (add_generation_prompt=True, enable_thinking=True):
 /// `<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n`
-fn format_prompt_for_qwen3(prompt: &str) -> String {
+pub fn format_prompt_for_qwen3(prompt: &str) -> String {
     format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
 }
 
@@ -200,5 +204,18 @@ mod tests {
             format_prompt_for_qwen3("hi"),
             "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n"
         );
+    }
+
+    #[test]
+    fn guidance_pushes_away_from_the_negative_prediction() {
+        let pos = Array::from_slice(&[1.0f32, 2.0], &[2]);
+        let neg = Array::from_slice(&[0.5f32, 3.0], &[2]);
+        let at = |scale: f32| {
+            let g = guide(&pos, &neg, scale).unwrap();
+            g.eval().unwrap();
+            g.as_slice::<f32>().to_vec()
+        };
+        assert_eq!(at(0.0), [1.0, 2.0]); // 0: the prompt's prediction alone
+        assert_eq!(at(2.0), [2.0, 0.0]); // pos + 2 * (pos - neg)
     }
 }

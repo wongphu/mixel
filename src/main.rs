@@ -97,6 +97,12 @@ Smaller is faster: 512x512 takes ~13 s with z-image-turbo.
 Prompts: z-image-turbo reads at most 512 tokens (a few hundred words) and
 ignores the rest; the \"Token count\" line says when a prompt was cut.
 
+Guidance (--guidance-scale, --negative-prompt) is off by default, as all
+three models are meant to run; it doubles the time per step. z-image-turbo
+turns it on above 0, steering away from --negative-prompt (or from the
+empty prompt without one); a negative prompt alone is rejected.
+qwen-image-2.1 turns it on above 1 and needs a negative prompt.
+
 Running it:
   - Per 1024x1024 image: ~1 min (z-image-turbo), ~40-55 s
     (qwen-image-2.1-fast) or 7-8 min (qwen-image-2.1), plus a few seconds
@@ -131,7 +137,7 @@ struct Args {
     )]
     prompt: String,
 
-    /// The negative prompt (for CFG).
+    /// What guidance steers away from; needs --guidance-scale (see there).
     #[arg(long, default_value = "")]
     negative_prompt: String,
 
@@ -170,9 +176,11 @@ struct Args {
     #[arg(long)]
     num_steps: Option<usize>,
 
-    /// Guidance scale for CFG, used with --negative-prompt [default: 5 for
-    /// z-image-turbo, 1 (off) for qwen-image-2.1; qwen-image-2.1-fast has no
-    /// guidance].
+    /// Classifier-free guidance, as each model's reference pipeline defines
+    /// it. z-image-turbo: on above 0 (default 0), against --negative-prompt or
+    /// the empty prompt. qwen-image-2.1: on above 1 (default 1) with
+    /// --negative-prompt. qwen-image-2.1-fast: none. Guidance runs the model
+    /// twice per step.
     #[arg(long)]
     guidance_scale: Option<f64>,
 
@@ -938,6 +946,8 @@ mod tests {
                 "512",
                 "--negative-prompt",
                 "ugly",
+                "--guidance-scale",
+                "1.5",
             ],
         );
         let jobs = read_jobs(&input, &a).unwrap();
@@ -946,7 +956,7 @@ mod tests {
         let (j1, j2) = (&jobs[0], &jobs[1]);
         assert_eq!((j1.width, j1.height, j1.num_steps), (512, 512, 9));
         assert_eq!(j1.negative_prompt, "ugly");
-        assert_eq!(j1.guidance_scale, 5.0);
+        assert_eq!(j1.guidance_scale, 1.5);
         assert_eq!((j2.width, j2.height, j2.num_steps), (768, 512, 4));
         assert_eq!(j2.negative_prompt, "blur");
         assert_eq!(j2.guidance_scale, 2.5);
@@ -1399,7 +1409,7 @@ not json
         assert_eq!((job.num_steps, job.guidance_scale), (40, 1.0));
         assert_eq!(job.output, PathBuf::from("qwen_image_output.png"));
         let job = single_job(&args(&["--seed", "1"])).unwrap();
-        assert_eq!((job.num_steps, job.guidance_scale), (9, 5.0));
+        assert_eq!((job.num_steps, job.guidance_scale), (9, 0.0));
         assert_eq!(job.output, PathBuf::from("z_image_output.png"));
         let job = single_job(&args(&["--model", "qwen-fast", "--seed", "1"])).unwrap();
         assert_eq!((job.num_steps, job.guidance_scale), (4, 1.0));

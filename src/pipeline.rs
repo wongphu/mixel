@@ -62,11 +62,12 @@ impl Model {
         }
     }
 
-    /// Default guidance scale. Guidance only runs with a negative prompt, and
-    /// Qwen-Image-2.1 is meant to be sampled without it (1.0).
+    /// Default guidance scale: off for every model. Each follows its
+    /// reference pipeline's convention (see [`GenerateOptions::guidance_scale`]),
+    /// so off is 0 for Z-Image-Turbo and 1 for Qwen-Image-2.1.
     pub fn default_guidance(self) -> f64 {
         match self {
-            Model::ZImageTurbo => 5.0,
+            Model::ZImageTurbo => 0.0,
             Model::QwenImage21 | Model::QwenImage21Fast => 1.0,
         }
     }
@@ -121,11 +122,19 @@ pub struct LoadOptions {
 #[derive(Clone, PartialEq)]
 pub struct GenerateOptions {
     pub prompt: String,
-    /// Used for classifier-free guidance when non-empty and `guidance_scale > 1`.
+    /// What guidance steers away from (see `guidance_scale`).
     pub negative_prompt: String,
     pub width: usize,
     pub height: usize,
     pub num_steps: usize,
+    /// Classifier-free guidance, in each model's own convention:
+    /// - Z-Image-Turbo (diffusers' `ZImagePipeline`): `pos + s * (pos - neg)`,
+    ///   on when `s > 0`, against the empty prompt if `negative_prompt` is
+    ///   empty. Turbo is distilled to run without it (0).
+    /// - Qwen-Image-2.1 (true CFG): `neg + s * (pos - neg)`, on when `s > 1`
+    ///   and `negative_prompt` is set. The 4-step variant runs without it.
+    ///
+    /// Guidance runs the model twice per step.
     pub guidance_scale: f64,
     /// Seeds the initial noise; the same seed and options give the same image.
     pub seed: u64,
@@ -216,6 +225,17 @@ impl GenerateOptions {
         );
         anyhow::ensure!(!self.prompt.trim().is_empty(), "prompt is empty");
         anyhow::ensure!(self.num_steps > 0, "num_steps must be at least 1");
+        if model == Model::ZImageTurbo {
+            anyhow::ensure!(
+                self.guidance_scale >= 0.0,
+                "guidance_scale must be at least 0, got {}",
+                self.guidance_scale
+            );
+            anyhow::ensure!(
+                self.negative_prompt.is_empty() || self.guidance_scale > 0.0,
+                "a negative prompt needs guidance_scale above 0 ({model} runs without guidance by default)"
+            );
+        }
         if model == Model::QwenImage21Fast {
             let steps = crate::qwen21::fast::STEPS;
             anyhow::ensure!(
@@ -531,6 +551,25 @@ mod tests {
             (1024, 1024, DEFAULT_STEPS, 0)
         );
         assert!(o.negative_prompt.is_empty());
+        assert_eq!(o.guidance_scale, 0.0); // Turbo runs without guidance
+    }
+
+    #[test]
+    fn z_image_guidance_follows_diffusers_convention() {
+        let mut o = opts(512, 512);
+        o.guidance_scale = 2.0; // against the empty prompt
+        o.validate(Model::ZImageTurbo).unwrap();
+        o.negative_prompt = "blurry".into();
+        o.validate(Model::ZImageTurbo).unwrap();
+
+        // A negative prompt without guidance would be ignored: an error instead.
+        o.guidance_scale = 0.0;
+        let err = o.validate(Model::ZImageTurbo).unwrap_err().to_string();
+        assert!(err.contains("needs guidance_scale above 0"), "{err}");
+
+        o.guidance_scale = -1.0;
+        let err = o.validate(Model::ZImageTurbo).unwrap_err().to_string();
+        assert!(err.contains("at least 0"), "{err}");
     }
 
     #[test]

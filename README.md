@@ -173,8 +173,8 @@ transformer (one step, 32-token caption) 1.4%, VAE decode 2.5%, VAE encode 1.5% 
 
 ### Z-Image sampling follows diffusers
 
-candle's port leaves out two things the reference implementation (diffusers'
-`ZImagePipeline`) does, and mixel follows the reference:
+mixel first sampled like candle's port and `candy`; it now follows the reference
+implementation, diffusers' `ZImagePipeline`, in three ways:
 
 - **The schedule.** The sigmas are `linspace(1, 1/n, n)` shifted by `3s / (1 + 2s)`
   (1.0, 0.96, 0.91 … 0.27 for 9 steps), so more steps are spent at high noise; candle
@@ -182,13 +182,18 @@ candle's port leaves out two things the reference implementation (diffusers'
 - **Pad tokens.** The caption and the image are padded to a multiple of 32 tokens with the
   model's learned `cap_pad_token` / `x_pad_token`, which the image attends to, and the
   image's RoPE position comes after the padded caption.
+- **Guidance.** `--guidance-scale s` gives `pos + s·(pos − neg)`, on for any `s > 0`, against
+  `--negative-prompt` or the empty prompt (mixel used `neg + s·(pos − neg)`, only with a
+  negative prompt). The default is 0, as Turbo is meant to run; a negative prompt without
+  guidance is rejected. An old scale `s` with a negative prompt is `s − 1` now.
 
 The time input and the latents also stay in f32 between steps, as in diffusers.
 `scripts/make_zimage_reference.py` records diffusers' sampling at 512×512, and
 `cargo run --release --example zimage_diffusers_parity -- <dir>` checks mixel against it:
 schedule and time inputs identical, each step within 1–3%, and the final image 6.5% off
-(bf16 noise compounding over 9 steps; the images look the same). Without the pad tokens,
-each step was 3–21% off and the final image 34%. The candle check above uses a 32-token
+(bf16 noise compounding over 9 steps; the images look the same), or 7.4% with guidance 3.
+Without the pad tokens each step was 3–21% off and the final image 34%; with the old
+guidance formula the guided image was 27% off. The candle check above uses a 32-token
 caption, where neither implementation pads.
 
 ## Qwen-Image-2.1: accuracy and speed

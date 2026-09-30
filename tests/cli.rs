@@ -73,6 +73,22 @@ fn single_mode_rejects_bad_size_before_loading_model() {
 }
 
 #[test]
+fn z_image_negative_prompt_without_guidance_fails_before_loading_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = mixel(
+        &["--prompt", "x", "--negative-prompt", "blurry"],
+        dir.path(),
+    );
+    assert!(!out.status.success());
+    assert!(
+        text(&out.stderr).contains("needs guidance_scale above 0"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!text(&out.stdout).contains("Loading"));
+}
+
+#[test]
 fn conflicting_flags_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let out = mixel(&["-i", "p.jsonl", "--prompt", "x"], dir.path());
