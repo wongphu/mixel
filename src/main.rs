@@ -105,12 +105,12 @@ struct Args {
     output: Option<String>,
 
     /// JSONL file with one image per line, e.g.
-    /// {"prompt": "a cat", "seed": 1, "width": 768, "output": "cat.png"}.
-    /// Fields: prompt (required), negative_prompt, width, height, num_steps,
+    /// {"id": "cat", "prompt": "a cat", "seed": 1, "width": 768}.
+    /// Fields: prompt (required), id, negative_prompt, width, height, num_steps,
     /// guidance_scale, seed, output, init_image, strength, reference_images
     /// (a list). Omitted fields use the CLI values; omitted output defaults to
-    /// the line number, e.g. 0003.png. Relative image paths are relative to
-    /// the JSONL file.
+    /// the id (cat.png), else the line number (0003.png). Relative image paths
+    /// are relative to the JSONL file.
     #[arg(long, short)]
     input: Option<PathBuf>,
 
@@ -157,6 +157,8 @@ struct Job {
 #[serde(deny_unknown_fields)]
 struct JobSpec {
     prompt: String,
+    /// Names the output file when `output` is absent; a string or a number.
+    id: Option<serde_json::Value>,
     negative_prompt: Option<String>,
     width: Option<usize>,
     height: Option<usize>,
@@ -400,6 +402,17 @@ fn single_job(args: &Args) -> Result<Job> {
     .with_seed(args.seed))
 }
 
+/// The output filename for a line's `id`: `<id>.png`.
+fn id_file_name(id: &serde_json::Value) -> Result<String> {
+    let id = match id {
+        serde_json::Value::String(s) => s.trim().to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        other => anyhow::bail!("id must be a string or a number, got {other}"),
+    };
+    anyhow::ensure!(!id.is_empty(), "id is empty");
+    Ok(format!("{id}.png"))
+}
+
 /// Parses and validates every line of a JSONL file, reporting all problems at once.
 fn read_jobs(path: &Path, args: &Args) -> Result<Vec<Job>> {
     let content =
@@ -420,7 +433,17 @@ fn read_jobs(path: &Path, args: &Args) -> Result<Vec<Job>> {
                 continue;
             }
         };
-        let output = spec.output.unwrap_or_else(|| format!("{line_no:04}.png"));
+        let output = match (spec.output, spec.id) {
+            (Some(output), _) => output,
+            (None, Some(id)) => match id_file_name(&id) {
+                Ok(name) => name,
+                Err(e) => {
+                    errors.push(format!("line {line_no}: {e:#}"));
+                    continue;
+                }
+            },
+            (None, None) => format!("{line_no:04}.png"),
+        };
         let seed = spec.seed.or(args.seed);
         // Line paths are relative to the JSONL file; the CLI defaults to the cwd.
         let base = path.parent().unwrap_or(Path::new("."));
@@ -780,6 +803,55 @@ mod tests {
             jobs.iter().map(|j| j.line).collect::<Vec<_>>(),
             vec![1, 3, 4]
         );
+    }
+
+    #[test]
+    fn read_jobs_names_outputs_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = write_jsonl(
+            dir.path(),
+            concat!(
+                "{\"id\": \"fox\", \"prompt\": \"a\", \"seed\": 1}\n",
+                "{\"id\": 42, \"prompt\": \"b\", \"seed\": 2}\n",
+                "{\"id\": \"x\", \"prompt\": \"c\", \"seed\": 3, \"output\": \"c.png\"}\n",
+                "{\"prompt\": \"d\", \"seed\": 4}\n",
+            ),
+        );
+        let jobs = read_jobs(&input, &batch_args(&input, &["--output-dir", "out"])).unwrap();
+        let outputs: Vec<_> = jobs.iter().map(|j| j.output.clone()).collect();
+        assert_eq!(
+            outputs,
+            vec![
+                PathBuf::from("out/fox.png"),
+                PathBuf::from("out/42.png"),
+                PathBuf::from("out/c.png"),
+                PathBuf::from("out/0004.png")
+            ]
+        );
+    }
+
+    #[test]
+    fn read_jobs_rejects_bad_and_duplicate_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = write_jsonl(
+            dir.path(),
+            concat!(
+                "{\"id\": \"a\", \"prompt\": \"a\"}\n",
+                "{\"id\": \"a\", \"prompt\": \"b\"}\n",
+                "{\"id\": \" \", \"prompt\": \"c\"}\n",
+                "{\"id\": [1], \"prompt\": \"d\"}\n",
+            ),
+        );
+        let err = read_jobs(&input, &batch_args(&input, &[]))
+            .unwrap_err()
+            .to_string();
+        for expected in [
+            "line 2: output ./a.png is also used by line 1",
+            "line 3: id is empty",
+            "line 4: id must be a string or a number",
+        ] {
+            assert!(err.contains(expected), "missing {expected:?} in:\n{err}");
+        }
     }
 
     #[test]

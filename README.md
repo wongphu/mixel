@@ -103,13 +103,14 @@ mixel --input prompts.jsonl --output-dir out
 ```
 
 ```json
-{"prompt": "A red fox in fresh snow", "seed": 3}
+{"id": "fox", "prompt": "A red fox in fresh snow", "seed": 3}
 {"prompt": "A bowl of ramen, top-down", "output": "food/ramen.png"}
 {"prompt": "A watercolor sailboat at dawn", "width": 768, "height": 512, "num_steps": 6}
 ```
 
-Fields: `prompt` (required), `negative_prompt`, `width`, `height`, `num_steps`,
-`guidance_scale`, `seed`, `output`, `init_image`, `strength`, `reference_images`; omitted
+Fields: `prompt` (required), `id`, `negative_prompt`, `width`, `height`, `num_steps`,
+`guidance_scale`, `seed`, `output`, `init_image`, `strength`, `reference_images`. Without
+`output`, the file is named after `id` (`fox.png`), else the line number (`0003.png`). Omitted
 fields fall back to the CLI flags (the model is chosen with `--model` for the whole batch). Lines are
 validated before the model loads, existing outputs are skipped (`--overwrite` to redo),
 and failed lines are reported at the end. Same behavior as `candy`.
