@@ -24,7 +24,7 @@ enum ModelArg {
     /// Qwen-Image-2.1: slower (40 steps); also edits with --ref-image
     #[value(name = "qwen-image-2.1", alias = "qwen")]
     QwenImage21,
-    /// Qwen-Image-2.1 in 4 steps (Fun-Acc adapter): ~7x faster, slightly
+    /// Qwen-Image-2.1 in 4 steps (Fun-Acc adapter): ~10x faster, slightly
     /// softer fine detail; also edits with --ref-image
     #[value(name = "qwen-image-2.1-fast", alias = "qwen-fast")]
     QwenImage21Fast,
@@ -46,14 +46,15 @@ const GUIDE: &str = "\
 USAGE GUIDE (for scripts and AI agents)
 
 Choosing a model:
-  z-image-turbo (default)  Fast: ~70 s for 1024x1024 on an M3 Max. Use for
+  z-image-turbo (default)  Fast: ~60 s for 1024x1024 on an M3 Max. Use for
                            text-to-image and img2img.
-  qwen-image-2.1-fast      ~50 s for 1024x1024 (4 steps). Use to edit
-  (alias qwen-fast)        existing images (--ref-image). Fine detail and
-                           small text are a little softer than with
-                           qwen-image-2.1.
-  qwen-image-2.1           5-7 min for 1024x1024 (40 steps). Use when the
-                           fast variant's detail is not enough.
+  qwen-image-2.1-fast      ~40 s for 1024x1024, ~55 s for an edit (4 steps).
+  (alias qwen-fast)        Use to edit existing images (--ref-image). Fine
+                           detail and small text are a little softer than
+                           with qwen-image-2.1.
+  qwen-image-2.1           ~7 min for 1024x1024, ~8 min for an edit (40
+                           steps). Use when the fast variant's detail is
+                           not enough.
   Both Qwen variants' weights are for research, not commercial use.
 
 Recipes:
@@ -91,14 +92,15 @@ Where the image goes:
 
 Sizes: width and height must be multiples of 16 (z-image-turbo) or 32
 (qwen models); default 1024x1024, or follows --init-image / --ref-image.
-Smaller is faster: 512x512 takes ~14 s with z-image-turbo.
+Smaller is faster: 512x512 takes ~13 s with z-image-turbo.
 
 Prompts: z-image-turbo reads at most 512 tokens (a few hundred words) and
 ignores the rest; the \"Token count\" line says when a prompt was cut.
 
 Running it:
-  - Per 1024x1024 image: ~1 min (z-image-turbo, qwen-image-2.1-fast) or
-    5-7 min (qwen-image-2.1), plus model loading. The first run downloads
+  - Per 1024x1024 image: ~1 min (z-image-turbo), ~40-55 s
+    (qwen-image-2.1-fast) or 7-8 min (qwen-image-2.1), plus a few seconds
+    of model loading once the weights are cached. The first run downloads
     ~33 GB (z-image-turbo) or ~31 GB (qwen models; the fast variant adds
     0.35 GB) to ~/.cache/huggingface. Use long timeouts or run it in the
     background.
