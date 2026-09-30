@@ -248,7 +248,7 @@ fn main() -> Result<()> {
     let t0 = vec(&t2i["tr_timestep"])?[0];
     let segs = segments_from_mask(&t2i["tr_img_mask"], 256, &[])?;
     let cache = tr.prefill(&t2i["tr_encoder_in"].as_dtype(bf16)?, &[], &segs)?;
-    let out = tr.forward(&t2i["tr_hidden_in"].as_dtype(bf16)?, t0, 32, 32, &cache)?;
+    let out = tr.forward(&t2i["tr_hidden_in"].as_dtype(bf16)?, t0, 32, 32, &cache, 0)?;
     report(
         "t2i step 1 (t=1.0)",
         &out,
@@ -262,7 +262,7 @@ fn main() -> Result<()> {
     let segs = segments_from_mask(&edit["tr_img_mask"], 256, &[(32, 32)])?;
     println!("  edit segments: {segs:?}");
     let cache = tr.prefill(&edit["tr_encoder_in"].as_dtype(bf16)?, &[cond], &segs)?;
-    let out = tr.forward(&target, vec(&edit["tr_timestep"])?[0], 32, 32, &cache)?;
+    let out = tr.forward(&target, vec(&edit["tr_timestep"])?[0], 32, 32, &cache, 0)?;
     report(
         "edit step 1 (with reference image)",
         &out,
@@ -284,7 +284,7 @@ fn main() -> Result<()> {
             .as_dtype(bf16)?
             .divide(Array::from_f32(1000.0).as_dtype(bf16)?)?;
         let t = vec(&t)?[0];
-        let v = tr.forward(&x, t, 32, 32, &cache)?;
+        let v = tr.forward(&x, t, 32, 32, &cache, i)?;
         let dt = sig[i + 1] - sig[i];
         x = x
             .as_dtype(Dtype::Float32)?

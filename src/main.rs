@@ -24,6 +24,10 @@ enum ModelArg {
     /// Qwen-Image-2.1: slower (40 steps); also edits with --ref-image
     #[value(name = "qwen-image-2.1", alias = "qwen")]
     QwenImage21,
+    /// Qwen-Image-2.1 in 4 steps (Fun-Acc adapter): ~7x faster, slightly
+    /// softer fine detail; also edits with --ref-image
+    #[value(name = "qwen-image-2.1-fast", alias = "qwen-fast")]
+    QwenImage21Fast,
 }
 
 impl ModelArg {
@@ -31,6 +35,7 @@ impl ModelArg {
         match self {
             Self::ZImageTurbo => Model::ZImageTurbo,
             Self::QwenImage21 => Model::QwenImage21,
+            Self::QwenImage21Fast => Model::QwenImage21Fast,
         }
     }
 }
@@ -43,15 +48,19 @@ USAGE GUIDE (for scripts and AI agents)
 Choosing a model:
   z-image-turbo (default)  Fast: ~70 s for 1024x1024 on an M3 Max. Use for
                            text-to-image and img2img.
-  qwen-image-2.1           ~7 min for 1024x1024. Use only to edit existing
-                           images (--ref-image). Its weights are for
-                           research, not commercial use.
+  qwen-image-2.1-fast      ~50 s for 1024x1024 (4 steps). Use to edit
+  (alias qwen-fast)        existing images (--ref-image). Fine detail and
+                           small text are a little softer than with
+                           qwen-image-2.1.
+  qwen-image-2.1           5-7 min for 1024x1024 (40 steps). Use when the
+                           fast variant's detail is not enough.
+  Both Qwen variants' weights are for research, not commercial use.
 
 Recipes:
   Text to image:
     mixel --prompt \"a red fox in snow\" --seed 1 --output fox.png
   Edit a photo (keeps its content, changes what the prompt says):
-    mixel --model qwen-image-2.1 --ref-image in.png \\
+    mixel --model qwen-image-2.1-fast --ref-image in.png \\
           --prompt \"make it night\" --seed 1 --output night.png
   Variation of an image (img2img; lower --strength = closer to it):
     mixel --init-image in.png --strength 0.7 --prompt \"...\" --seed 1 --output v.png
@@ -81,19 +90,23 @@ Where the image goes:
   - Output names must end in .png or .jpg (checked before loading).
 
 Sizes: width and height must be multiples of 16 (z-image-turbo) or 32
-(qwen-image-2.1); default 1024x1024, or follows --init-image / --ref-image.
+(qwen models); default 1024x1024, or follows --init-image / --ref-image.
 Smaller is faster: 512x512 takes ~14 s with z-image-turbo.
 
 Prompts: z-image-turbo reads at most 512 tokens (a few hundred words) and
 ignores the rest; the \"Token count\" line says when a prompt was cut.
 
 Running it:
-  - Takes ~1 min (z-image-turbo) or ~7 min (qwen-image-2.1) per 1024x1024
-    image, plus model loading. The first run downloads
-    ~33 GB (z-image-turbo) or ~31 GB (qwen-image-2.1) to
-    ~/.cache/huggingface. Use long timeouts or run it in the background.
+  - Per 1024x1024 image: ~1 min (z-image-turbo, qwen-image-2.1-fast) or
+    5-7 min (qwen-image-2.1), plus model loading. The first run downloads
+    ~33 GB (z-image-turbo) or ~31 GB (qwen models; the fast variant adds
+    0.35 GB) to ~/.cache/huggingface. Use long timeouts or run it in the
+    background.
+  - qwen-image-2.1-fast always runs 4 steps without guidance: --num-steps
+    other than 4, or --guidance-scale above 1 with a negative prompt, is
+    rejected.
   - Needs Apple Silicon and lots of memory: ~39 GB peak for z-image-turbo
-    at 1024x1024, ~55-70 GB for qwen-image-2.1. Run one mixel at a time.
+    at 1024x1024, ~55-70 GB for the qwen models. Run one mixel at a time.
   - Arguments and every batch line are validated before the model loads,
     so mistakes fail within a second.
   - Exit status 0 on success; non-zero on invalid input, a failed image,
@@ -150,12 +163,14 @@ struct Args {
     #[arg(long)]
     strength: Option<f64>,
 
-    /// Number of inference steps [default: 9 for z-image-turbo, 40 for qwen-image-2.1].
+    /// Number of inference steps [default: 9 for z-image-turbo, 40 for
+    /// qwen-image-2.1; qwen-image-2.1-fast always runs 4].
     #[arg(long)]
     num_steps: Option<usize>,
 
     /// Guidance scale for CFG, used with --negative-prompt [default: 5 for
-    /// z-image-turbo, 1 (off) for qwen-image-2.1].
+    /// z-image-turbo, 1 (off) for qwen-image-2.1; qwen-image-2.1-fast has no
+    /// guidance].
     #[arg(long)]
     guidance_scale: Option<f64>,
 
@@ -481,7 +496,9 @@ fn default_output(args: &Args) -> PathBuf {
     match (&args.output, args.model()) {
         (Some(o), _) => PathBuf::from(o),
         (None, Model::ZImageTurbo) => PathBuf::from("z_image_output.png"),
-        (None, Model::QwenImage21) => PathBuf::from("qwen_image_output.png"),
+        (None, Model::QwenImage21 | Model::QwenImage21Fast) => {
+            PathBuf::from("qwen_image_output.png")
+        }
     }
 }
 
@@ -1363,6 +1380,14 @@ not json
             Model::QwenImage21
         );
         assert_eq!(args(&["--model", "qwen"]).model(), Model::QwenImage21);
+        assert_eq!(
+            args(&["--model", "qwen-image-2.1-fast"]).model(),
+            Model::QwenImage21Fast
+        );
+        assert_eq!(
+            args(&["--model", "qwen-fast"]).model(),
+            Model::QwenImage21Fast
+        );
         assert!(Args::try_parse_from(["candy", "--model", "sdxl"]).is_err());
     }
 
@@ -1374,6 +1399,24 @@ not json
         let job = single_job(&args(&["--seed", "1"])).unwrap();
         assert_eq!((job.num_steps, job.guidance_scale), (9, 5.0));
         assert_eq!(job.output, PathBuf::from("z_image_output.png"));
+        let job = single_job(&args(&["--model", "qwen-fast", "--seed", "1"])).unwrap();
+        assert_eq!((job.num_steps, job.guidance_scale), (4, 1.0));
+        assert_eq!(job.output, PathBuf::from("qwen_image_output.png"));
+    }
+
+    #[test]
+    fn fast_qwen_rejects_other_step_counts_before_loading() {
+        let job = single_job(&args(&[
+            "--model",
+            "qwen-fast",
+            "--num-steps",
+            "8",
+            "--seed",
+            "1",
+        ]))
+        .unwrap();
+        let err = job.validate(&mut HashSet::new()).unwrap_err().to_string();
+        assert!(err.contains("always runs 4 steps"), "{err}");
     }
 
     #[test]

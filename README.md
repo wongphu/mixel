@@ -1,12 +1,14 @@
 # mixel
 
 Text-to-image and image editing on Apple Silicon with
-[mlx-rs](https://github.com/oxiglade/mlx-rs) (Rust bindings to MLX), for two models:
+[mlx-rs](https://github.com/oxiglade/mlx-rs) (Rust bindings to MLX), for two models, one of
+them also in a 4-step variant:
 
 | `--model` | Model | Default steps | 1024×1024 image | Can do |
 |---|---|---:|---:|---|
 | `z-image-turbo` (default) | [Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | 9 | ~68 s | text-to-image, img2img |
-| `qwen-image-2.1` | [Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1) | 40 | ~7 min | text-to-image, img2img, **editing with reference images** |
+| `qwen-image-2.1` | [Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1) | 40 | 5–7 min | text-to-image, img2img, **editing with reference images** |
+| `qwen-image-2.1-fast` | Qwen-Image-2.1 + [4-step Fun-Acc LoRA](https://huggingface.co/alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs) | 4 (fixed) | ~50 s | the same, slightly softer fine detail |
 
 Times are for an M3 Max. Both are ports: Z-Image of candle-transformers' `z_image`
 (`src/zimage/`), Qwen-Image-2.1 of the diffusers pipeline and transformers' Qwen3-VL
@@ -17,13 +19,14 @@ Times are for an M3 Max. Both are ports: Z-Image of candle-transformers' `z_imag
 cargo install --path .
 mixel --prompt "A cute robot holding a candle" --seed 42
 mixel --model qwen-image-2.1 --prompt "A capybara wearing a wizard hat, oil painting" --seed 1
+mixel --model qwen-fast --ref-image fox.png --prompt "Turn the fox into a gray wolf" --seed 1
 ```
 
 - The first run downloads the weights to `~/.cache/huggingface`: ~33 GB for Z-Image-Turbo
-  (shared with `candy`), ~31 GB for Qwen-Image-2.1.
+  (shared with `candy`), ~31 GB for Qwen-Image-2.1, plus 0.35 GB for the 4-step adapter.
 - Without `--seed`, a random seed is used and added to the filename (`z_image_output-1234567.png`).
 - Width/height must be multiples of 16 (Z-Image) or 32 (Qwen-Image). `--model-path <dir>`
-  uses local weights.
+  uses local weights (the 4-step adapter still comes from the Hugging Face cache).
 - Each run prints a timing breakdown: text encoding, init image, denoising, VAE.
 
 ## For AI agents and scripts
@@ -51,6 +54,23 @@ Each image is resized to about 1024×1024 px at its own aspect ratio; without
 In JSONL use `"reference_images": ["a.png", "b.png"]` (relative to the JSONL file).
 Editing is slower than text-to-image, since each step also attends to every
 reference-image token.
+
+## Qwen-Image-2.1 in 4 steps
+
+`--model qwen-image-2.1-fast` (or `qwen-fast`) adds Alibaba PAI's
+[Fun-Acc LoRA](https://huggingface.co/alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs), distilled
+with Parallel Decoding Distillation, to the same base weights: text-to-image, img2img and
+editing run in 4 steps instead of 40, about 50 s instead of 5–7 min for a 1024×1024 image
+(~65 s for an edit). A step costs the same as the base model's, so the gain is the step
+count.
+
+- It always runs its fixed 4-step schedule (`1.0, 0.917, 0.786, 0.549, 0`), without guidance:
+  other `--num-steps`, or a negative prompt with `--guidance-scale` above 1, are rejected.
+  With `--init-image`, `--strength` skips steps of that schedule (0.5 runs the last 2).
+- Its authors note that small dense text can lose legibility and some edits come out
+  slightly blurrier and darker than with 40 steps. Use `qwen-image-2.1` when that matters.
+- Like the reference, the rank-64 updates run as separate low-rank matmuls. They are only
+  ~0.2% of the weights, so merging them into bf16 weights would round away 40–60% of each.
 
 ## Image to image
 
@@ -94,7 +114,7 @@ println!("{:?}", out.timings);       // text / init image / denoise / vae durati
 let photo = image::open("photo.jpg")?.to_rgb8();
 let variation = GenerateOptions { init_image: Some(photo.clone()), strength: 0.75, ..opts };
 
-// Qwen-Image-2.1 with a reference image
+// Qwen-Image-2.1 with a reference image (Model::QwenImage21Fast for 4 steps)
 let qwen = Pipeline::load(&LoadOptions { model: Model::QwenImage21, ..Default::default() })?;
 let edit = GenerateOptions {
     reference_images: vec![image::open("photo.png")?.to_rgba8()], // alpha is kept
@@ -173,11 +193,27 @@ s/step for diffusers on the same M3 Max. An edit with one ~1024×1024 reference 
 11.8 s/step (485 s, 69 GB peak). The text and reference-image tokens are computed
 once per image and cached (as in the reference), so each step only runs the target tokens.
 
+**The 4-step variant.** `scripts/make_qwen21_fast_reference.py` runs the adapter through its
+authors' own code (`qwenimage21_pdd.py`) at 512×512 and records every step;
+`cargo run --release --example qwen21_fast_parity -- <dir>` checks this port against it.
+Each step, given the reference's input, is within 0.5–1% (bf16 noise), and a full edit ends
+1.3% off. A full text-to-image run ends ~11% off with the same composition: its four large
+steps amplify any input difference 10–16× per step even within one implementation (the
+example measures this), so the ~1% gap between two bf16 implementations grows. On MPS,
+diffusers rounds the latents back to bf16 after each step (a workaround for an old PyTorch
+bug); the adapter expects them in f32, as on CUDA, so the script turns that off.
+
 ## Tests
 
 ```bash
 cargo test --release                  # unit + CLI tests, no model needed
 cargo test --release -- --ignored     # end-to-end generation with the real models
+
+# Parity with the PyTorch reference (needs torch and diffusers >= 0.41; see the scripts)
+python scripts/make_qwen21_reference.py <qwen-snapshot-dir> fox.png
+cargo run --release --example qwen21_parity -- . fox.png
+python scripts/make_qwen21_fast_reference.py <qwen-snapshot-dir> fox.png
+cargo run --release --example qwen21_fast_parity -- .
 ```
 
 ## Building
@@ -196,5 +232,6 @@ MIT, see [LICENSE](LICENSE). The Z-Image code is ported from candle-transformers
 (Apache-2.0, see [LICENSE-APACHE](LICENSE-APACHE)).
 
 The model weights have their own licenses, which you accept when downloading them.
-In particular, **Qwen-Image-2.1's weights are under the Qwen Research License: research
-and evaluation only, not commercial use** without a separate license from Qwen.
+In particular, **Qwen-Image-2.1's weights, and the 4-step adapter's, are under the Qwen
+Research License: research and evaluation only, not commercial use** without a separate
+license from Qwen.

@@ -24,24 +24,33 @@ pub enum Model {
     /// Qwen-Image-2.1: slower (40 steps), text-to-image, img2img, and editing
     /// with reference images.
     QwenImage21,
+    /// Qwen-Image-2.1 with the 4-step Fun-Acc adapter ([`crate::qwen21::fast`]):
+    /// the same tasks ~7x faster, with slightly softer fine detail.
+    QwenImage21Fast,
 }
 
 impl Model {
-    pub const ALL: [Model; 2] = [Model::ZImageTurbo, Model::QwenImage21];
+    pub const ALL: [Model; 3] = [
+        Model::ZImageTurbo,
+        Model::QwenImage21,
+        Model::QwenImage21Fast,
+    ];
 
     /// Short name, as used on the command line.
     pub fn name(self) -> &'static str {
         match self {
             Model::ZImageTurbo => "z-image-turbo",
             Model::QwenImage21 => "qwen-image-2.1",
+            Model::QwenImage21Fast => "qwen-image-2.1-fast",
         }
     }
 
-    /// Hugging Face repo of the weights.
+    /// Hugging Face repo of the weights (the fast variant also downloads
+    /// its adapter from [`crate::qwen21::fast::REPO`]).
     pub fn repo(self) -> &'static str {
         match self {
             Model::ZImageTurbo => DEFAULT_REPO,
-            Model::QwenImage21 => crate::qwen21::REPO,
+            Model::QwenImage21 | Model::QwenImage21Fast => crate::qwen21::REPO,
         }
     }
 
@@ -49,6 +58,7 @@ impl Model {
         match self {
             Model::ZImageTurbo => DEFAULT_STEPS,
             Model::QwenImage21 => crate::qwen21::DEFAULT_STEPS,
+            Model::QwenImage21Fast => crate::qwen21::fast::STEPS,
         }
     }
 
@@ -57,7 +67,7 @@ impl Model {
     pub fn default_guidance(self) -> f64 {
         match self {
             Model::ZImageTurbo => 5.0,
-            Model::QwenImage21 => 1.0,
+            Model::QwenImage21 | Model::QwenImage21Fast => 1.0,
         }
     }
 
@@ -65,13 +75,13 @@ impl Model {
     pub fn size_align(self) -> usize {
         match self {
             Model::ZImageTurbo => SIZE_ALIGN,
-            Model::QwenImage21 => crate::qwen21::SIZE_ALIGN,
+            Model::QwenImage21 | Model::QwenImage21Fast => crate::qwen21::SIZE_ALIGN,
         }
     }
 
     /// Whether the model can be conditioned on reference images (editing).
     pub fn supports_reference_images(self) -> bool {
-        matches!(self, Model::QwenImage21)
+        matches!(self, Model::QwenImage21 | Model::QwenImage21Fast)
     }
 }
 
@@ -206,6 +216,18 @@ impl GenerateOptions {
         );
         anyhow::ensure!(!self.prompt.trim().is_empty(), "prompt is empty");
         anyhow::ensure!(self.num_steps > 0, "num_steps must be at least 1");
+        if model == Model::QwenImage21Fast {
+            let steps = crate::qwen21::fast::STEPS;
+            anyhow::ensure!(
+                self.num_steps == steps,
+                "{model} always runs {steps} steps (its distilled schedule), got {}",
+                self.num_steps
+            );
+            anyhow::ensure!(
+                self.negative_prompt.is_empty() || self.guidance_scale <= 1.0,
+                "{model} runs without guidance: drop the negative prompt or set guidance_scale to 1"
+            );
+        }
         anyhow::ensure!(
             self.width > 0 && self.height > 0,
             "width and height must be positive, got {}x{}",
@@ -321,7 +343,11 @@ impl Pipeline {
         let files = ModelFiles::new(repo, opts.model_path.as_deref())?;
         let inner = match opts.model {
             Model::ZImageTurbo => Inner::ZImage(Box::new(ZImagePipeline::load(&files)?)),
-            Model::QwenImage21 => Inner::Qwen(Box::new(QwenPipeline::load(&files)?)),
+            Model::QwenImage21 => Inner::Qwen(Box::new(QwenPipeline::load(&files, None)?)),
+            Model::QwenImage21Fast => {
+                let adapter = ModelFiles::new(crate::qwen21::fast::REPO, None)?;
+                Inner::Qwen(Box::new(QwenPipeline::load(&files, Some(&adapter))?))
+            }
         };
         Ok(Self {
             model: opts.model,
@@ -545,6 +571,35 @@ mod tests {
         }
         assert!("sdxl".parse::<Model>().is_err());
         assert_eq!(Model::default(), Model::ZImageTurbo);
+    }
+
+    #[test]
+    fn fast_qwen_runs_its_four_steps_without_guidance() {
+        let fast = Model::QwenImage21Fast;
+        let o = GenerateOptions::for_model(fast, "x");
+        assert_eq!((o.num_steps, o.guidance_scale), (4, 1.0));
+        o.validate(fast).unwrap();
+        assert_eq!(fast.repo(), Model::QwenImage21.repo());
+        assert!(fast.supports_reference_images());
+
+        let mut o = GenerateOptions::for_model(fast, "x");
+        o.num_steps = 8;
+        let err = o.validate(fast).unwrap_err().to_string();
+        assert!(err.contains("always runs 4 steps"), "{err}");
+
+        let mut o = GenerateOptions::for_model(fast, "x");
+        o.negative_prompt = "blurry".into();
+        o.validate(fast).unwrap(); // guidance 1: the negative prompt is unused
+        o.guidance_scale = 4.0;
+        let err = o.validate(fast).unwrap_err().to_string();
+        assert!(err.contains("without guidance"), "{err}");
+
+        // img2img skips steps of the same 4-step schedule.
+        let mut o = GenerateOptions::for_model(fast, "x");
+        o.init_image = Some(image::RgbImage::new(64, 64));
+        o.strength = 0.5;
+        o.validate(fast).unwrap();
+        assert_eq!(o.steps_to_run(), 2);
     }
 
     #[test]

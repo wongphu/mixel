@@ -1,6 +1,7 @@
 //! Qwen-Image-2.1 generation: text-to-image, img2img, and editing with
 //! reference images (ports `QwenImage21Pipeline.__call__`).
 
+use super::fast::Adapter;
 use super::prompt::{self, EncodedPrompt};
 use super::text_encoder::{ImageEmbeds, TextEncoder};
 use super::transformer::{Segment, Transformer, TOKENS_PER_SLOT};
@@ -29,6 +30,8 @@ pub struct QwenPipeline {
     vision: VisionEncoder,
     transformer: Transformer,
     vae: Vae,
+    /// With the 4-step adapter: its fixed schedule.
+    fast_sigmas: Option<Vec<f32>>,
 }
 
 /// A reference image prepared once for both encoders.
@@ -42,7 +45,8 @@ struct Reference {
 }
 
 impl QwenPipeline {
-    pub fn load(files: &ModelFiles) -> Result<Self> {
+    /// Loads the base model, with the 4-step adapter applied if given.
+    pub fn load(files: &ModelFiles, adapter: Option<&ModelFiles>) -> Result<Self> {
         let dtype = Dtype::Bfloat16;
         let tokenizer =
             Tokenizer::from_file(files.get("processor/tokenizer.json")?).map_err(E::msg)?;
@@ -65,7 +69,16 @@ impl QwenPipeline {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let transformer = Transformer::load(&tr_files, dtype)?;
+        let mut transformer = Transformer::load(&tr_files, dtype)?;
+        let fast_sigmas = match adapter {
+            Some(files) => {
+                let adapter = Adapter::load(files, dtype)?;
+                let sigmas = adapter.sigmas.clone();
+                transformer.apply_adapter(adapter)?;
+                Some(sigmas)
+            }
+            None => None,
+        };
         let vae = Vae::load(files.get("vae/diffusion_pytorch_model.safetensors")?, dtype)?;
         mlx_rs::memory::clear_cache()?;
         Ok(Self {
@@ -76,6 +89,7 @@ impl QwenPipeline {
             vision,
             transformer,
             vae,
+            fast_sigmas,
         })
     }
 
@@ -162,7 +176,10 @@ impl QwenPipeline {
             None => None,
         };
 
-        let sigmas = scheduler::sigmas(opts.num_steps, n_tokens);
+        let sigmas = match &self.fast_sigmas {
+            Some(s) => s.clone(),
+            None => scheduler::sigmas(opts.num_steps, n_tokens),
+        };
         let shape = [1, n_tokens, super::LATENT_CHANNELS];
         let noise = Array::from_slice(
             &seeded_noise(opts.seed, [1, lh, lw, 64]),
@@ -187,21 +204,26 @@ impl QwenPipeline {
         let steps = opts.num_steps - start;
         for (i, step) in (start..opts.num_steps).enumerate() {
             let t = timestep(sigmas[step]);
-            let mut v = self.transformer.forward(&x, t, lh, lw, &cache)?;
+            // The adapter keeps the latents in f32 (below); the model reads bf16.
+            let x_in = x.as_dtype(self.dtype)?;
+            let mut v = self.transformer.forward(&x_in, t, lh, lw, &cache, step)?;
             if let Some(nc) = &neg_cache {
                 // True CFG: v = neg + scale * (pos - neg)
-                let nv = self.transformer.forward(&x, t, lh, lw, nc)?;
+                let nv = self.transformer.forward(&x_in, t, lh, lw, nc, step)?;
                 v = nv.add(
                     v.subtract(&nv)?
                         .multiply(crate::nn::scalar(opts.guidance_scale as f32, self.dtype)?)?,
                 )?;
             }
-            // Euler step in f32, like the scheduler.
+            // Euler step in f32, like the scheduler. The base model rounds the
+            // result back to bf16; the adapter keeps it in f32.
             let dt = sigmas[step + 1] - sigmas[step];
             x = x
                 .as_dtype(Dtype::Float32)?
-                .add(v.as_dtype(Dtype::Float32)?.multiply(Array::from_f32(dt))?)?
-                .as_dtype(self.dtype)?;
+                .add(v.as_dtype(Dtype::Float32)?.multiply(Array::from_f32(dt))?)?;
+            if self.fast_sigmas.is_none() {
+                x = x.as_dtype(self.dtype)?;
+            }
             x.eval()?;
             on_progress(Progress::Step {
                 step: i + 1,
@@ -214,9 +236,10 @@ impl QwenPipeline {
 
         let denoised = Instant::now();
         on_progress(Progress::Decoding);
-        let rgba = self
-            .vae
-            .decode(&x.reshape(&[1, lh as i32, lw as i32, 64])?)?;
+        let rgba = self.vae.decode(
+            &x.as_dtype(self.dtype)?
+                .reshape(&[1, lh as i32, lw as i32, 64])?,
+        )?;
         let image = to_image(&rgba)?;
 
         Ok(Generated {

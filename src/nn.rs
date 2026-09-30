@@ -9,6 +9,8 @@ use std::path::Path;
 /// Named weights loaded from safetensors, converted to one dtype.
 pub struct Weights {
     map: HashMap<String, Array>,
+    /// Low-rank updates `(down, up)` that [`linear`] adds to a layer's output.
+    lora: HashMap<String, (Array, Array)>,
 }
 
 impl Weights {
@@ -47,7 +49,10 @@ impl Weights {
             map.extend(converted);
         }
         anyhow::ensure!(!map.is_empty(), "no weights loaded");
-        Ok(Self { map })
+        Ok(Self {
+            map,
+            lora: HashMap::new(),
+        })
     }
 
     pub fn get(&self, name: &str) -> Result<&Array> {
@@ -59,6 +64,43 @@ impl Weights {
     pub fn has(&self, name: &str) -> bool {
         self.map.contains_key(name)
     }
+
+    /// Replaces an existing weight with one of the same shape and dtype.
+    pub fn replace(&mut self, name: &str, a: Array) -> Result<()> {
+        let old = self
+            .map
+            .get_mut(name)
+            .with_context(|| format!("missing weight {name}"))?;
+        anyhow::ensure!(
+            old.shape() == a.shape() && old.dtype() == a.dtype(),
+            "{name}: replacement {:?} {:?} does not match {:?} {:?}",
+            a.shape(),
+            a.dtype(),
+            old.shape(),
+            old.dtype()
+        );
+        *old = a;
+        Ok(())
+    }
+
+    /// Adds a low-rank update to the linear layer `prefix`: [`linear`] then
+    /// returns `x W^T + b + (x down^T) up^T`, like a PEFT LoRA with its
+    /// scaling folded into `up`. Kept separate rather than merged into `W`:
+    /// updates much smaller than the weights mostly round away in bf16.
+    pub fn add_lora(&mut self, prefix: &str, down: Array, up: Array) -> Result<()> {
+        let w = self.get(&format!("{prefix}.weight"))?.shape().to_vec();
+        anyhow::ensure!(
+            down.ndim() == 2
+                && up.ndim() == 2
+                && down.shape()[0] == up.shape()[1]
+                && [up.shape()[0], down.shape()[1]] == w[..],
+            "{prefix}: low-rank update {:?} x {:?} does not fit weight {w:?}",
+            up.shape(),
+            down.shape()
+        );
+        self.lora.insert(prefix.to_string(), (down, up));
+        Ok(())
+    }
 }
 
 /// A 0-d array of `dtype`, so arithmetic with it keeps the other operand's dtype.
@@ -66,15 +108,18 @@ pub fn scalar(v: f32, dtype: Dtype) -> Result<Array> {
     Ok(Array::from_f32(v).as_dtype(dtype)?)
 }
 
-/// `x @ W^T (+ b)` for PyTorch-style `prefix.weight` / optional `prefix.bias`.
+/// `x @ W^T (+ b)` for PyTorch-style `prefix.weight` / optional `prefix.bias`,
+/// plus the layer's low-rank update if it has one ([`Weights::add_lora`]).
 pub fn linear(x: &Array, w: &Weights, prefix: &str) -> Result<Array> {
-    let y = x.matmul(w.get(&format!("{prefix}.weight"))?.t())?;
+    let mut y = x.matmul(w.get(&format!("{prefix}.weight"))?.t())?;
     let bias = format!("{prefix}.bias");
     if w.has(&bias) {
-        Ok(y.add(w.get(&bias)?)?)
-    } else {
-        Ok(y)
+        y = y.add(w.get(&bias)?)?;
     }
+    if let Some((down, up)) = w.lora.get(prefix) {
+        y = y.add(x.matmul(down.t())?.matmul(up.t())?)?;
+    }
+    Ok(y)
 }
 
 /// RMSNorm over the last axis with `prefix.weight`.
@@ -180,4 +225,45 @@ pub fn split_seq(x: &Array, bounds: &[i32], axis: i32) -> Result<Vec<Array>> {
         return Ok(vec![x.clone()]);
     }
     Ok(mlx_rs::ops::split_at_indices(x, bounds, axis)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_adds_the_low_rank_update() {
+        // W = I (2x2), b = [1, 1], update = up (2x1) @ down (1x2)
+        let mut w = Weights {
+            map: HashMap::from([
+                (
+                    "l.weight".to_string(),
+                    Array::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2]),
+                ),
+                (
+                    "l.bias".to_string(),
+                    Array::from_slice(&[1.0f32, 1.0], &[2]),
+                ),
+            ]),
+            lora: HashMap::new(),
+        };
+        let x = Array::from_slice(&[2.0f32, 3.0], &[1, 2]);
+        let y = linear(&x, &w, "l").unwrap();
+        y.eval().unwrap();
+        assert_eq!(y.as_slice::<f32>(), &[3.0, 4.0]);
+
+        let down = Array::from_slice(&[1.0f32, 1.0], &[1, 2]); // x . [1, 1] = 5
+        let up = Array::from_slice(&[10.0f32, -1.0], &[2, 1]);
+        w.add_lora("l", down, up).unwrap();
+        let y = linear(&x, &w, "l").unwrap();
+        y.eval().unwrap();
+        assert_eq!(y.as_slice::<f32>(), &[53.0, -1.0]);
+
+        // Shapes must fit the layer.
+        let bad = Array::from_slice(&[1.0f32; 3], &[1, 3]);
+        let up = Array::from_slice(&[1.0f32; 2], &[2, 1]);
+        assert!(w.add_lora("l", bad, up.clone()).is_err());
+        let down = Array::from_slice(&[1.0f32; 2], &[1, 2]);
+        assert!(w.add_lora("missing", down, up).is_err());
+    }
 }

@@ -9,8 +9,9 @@
 //! layer's keys and values, and [`Transformer::forward`] then runs only the
 //! target image's tokens per step (the reference pipeline's KV cache).
 
+use super::fast::Adapter;
 use crate::nn::{gelu_tanh, layer_norm, linear, rms_norm, silu, split_seq, Weights};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use mlx_rs::fast::{scaled_dot_product_attention, ScaledDotProductAttentionMask};
 use mlx_rs::ops::{concatenate, split_at_indices, tanh};
 use mlx_rs::{Array, Dtype};
@@ -48,6 +49,8 @@ pub struct KvCache {
 pub struct Transformer {
     w: Weights,
     dtype: Dtype,
+    /// With the 4-step adapter: the `proj_out` weight of each step.
+    heads: Vec<Array>,
 }
 
 impl Transformer {
@@ -55,7 +58,30 @@ impl Transformer {
         Ok(Self {
             w: Weights::load(files, dtype, |_| true)?,
             dtype,
+            heads: Vec::new(),
         })
+    }
+
+    /// Applies the 4-step adapter: adds its low-rank updates, swaps in its
+    /// norm weights, and switches `proj_out` to its per-step heads.
+    pub fn apply_adapter(&mut self, adapter: Adapter) -> Result<()> {
+        for target in &adapter.targets {
+            let (down, up) = adapter.lora(target)?;
+            self.w.add_lora(target, down, up)?;
+        }
+        for name in &adapter.full {
+            self.w.replace(name, adapter.full(name)?.clone())?;
+        }
+        let proj = self.w.get("proj_out.weight")?.shape().to_vec();
+        for head in &adapter.heads {
+            anyhow::ensure!(
+                head.shape() == proj,
+                "adapter head {:?} does not match proj_out {proj:?}",
+                head.shape()
+            );
+        }
+        self.heads = adapter.heads;
+        Ok(())
     }
 
     /// Runs the prefix: text embeddings `txt` (1, L_text, 4096) from the text
@@ -132,8 +158,18 @@ impl Transformer {
     }
 
     /// Predicts the flow velocity for the target latents `x` (1, h*w, 64) at
-    /// normalized time `t`, attending to the cached prefix.
-    pub fn forward(&self, x: &Array, t: f32, h: usize, w: usize, cache: &KvCache) -> Result<Array> {
+    /// normalized time `t`, attending to the cached prefix. `step` is the
+    /// index in the sampling schedule; with the 4-step adapter it picks the
+    /// output head.
+    pub fn forward(
+        &self,
+        x: &Array,
+        t: f32,
+        h: usize,
+        w: usize,
+        cache: &KvCache,
+        step: usize,
+    ) -> Result<Array> {
         let mut x = linear(x, &self.w, "img_in")?;
         let positions = image_positions(cache.target_frame, h, w);
         let rope = rope_tables(&positions)?;
@@ -146,7 +182,16 @@ impl Transformer {
             .add(scalar(1.0, self.dtype)?)?
             .expand_dims(1)?;
         let x = layer_norm(&x, EPS)?.multiply(&scale)?;
-        linear(&x, &self.w, "proj_out")
+        if self.heads.is_empty() {
+            return linear(&x, &self.w, "proj_out");
+        }
+        let head = self.heads.get(step).with_context(|| {
+            format!(
+                "step {step} is past the adapter's {} steps",
+                self.heads.len()
+            )
+        })?;
+        Ok(x.matmul(head.t())?)
     }
 
     /// Zero-centered RMSNorm (scale = weight + 1, in f32), then a 2-layer MLP.

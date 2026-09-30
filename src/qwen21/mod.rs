@@ -4,6 +4,7 @@
 //! and transformers' Qwen3-VL (text encoder and vision encoder). Every stage is
 //! checked against the PyTorch reference in `examples/qwen21_parity.rs`.
 
+pub mod fast;
 pub mod pipeline;
 pub mod prompt;
 pub mod scheduler;
