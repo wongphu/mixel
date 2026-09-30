@@ -1,9 +1,9 @@
 [package]
 name = "mixel"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
-description = "Z-Image-Turbo text-to-image on Apple Silicon with mlx-rs"
+description = "Text-to-image, img2img and image editing on Apple Silicon with mlx-rs (Z-Image-Turbo, Qwen-Image-2.1)"
 
 [[bin]]
 name = "mixel"
