@@ -29,11 +29,11 @@ GIB=1073741824
 # Peak memory and reference times are from $REF_HW.
 TESTS=(
   "z512|Z-Image-Turbo, 512x512|z-image-turbo|--width 512 --height 512|9|3|26.7|13.2|1.4"
-  "z1024|Z-Image-Turbo, 1024x1024|z-image-turbo||9|3|36.4|60.6|6.6"
-  "fast|Qwen-Image-2.1 fast, 1024x1024|qwen-image-2.1-fast||4|3|52.1|42.7|10.0"
-  "fastedit|Qwen-Image-2.1 fast, edit|qwen-image-2.1-fast|--ref-image REF|4|3|64.8|58.5|10.7"
-  "qwen|Qwen-Image-2.1, 1024x1024|qwen-image-2.1||40|1|51.4|390.2|9.7"
-  "qwenedit|Qwen-Image-2.1, edit|qwen-image-2.1|--ref-image REF|40|1|64.2|458.3|11.0"
+  "z1024|Z-Image-Turbo, 1024x1024|z-image-turbo||9|3|36.4|59.0|6.4"
+  "fast|Qwen-Image-2.1 fast, 1024x1024|qwen-image-2.1-fast||4|3|52.1|36.8|8.7"
+  "fastedit|Qwen-Image-2.1 fast, edit|qwen-image-2.1-fast|--ref-image REF|4|3|64.8|63.6|11.6"
+  "qwen|Qwen-Image-2.1, 1024x1024|qwen-image-2.1||40|3|51.5|373.0|9.3"
+  "qwenedit|Qwen-Image-2.1, edit|qwen-image-2.1|--ref-image REF|40|3|64.2|444.5|10.7"
 )
 # Models (Hugging Face repo, download GB) in the order the tests use them.
 repo_of() {
@@ -129,7 +129,12 @@ if [ -n "$DOWNLOADS" ]; then
 else
   echo "All needed weights are already downloaded."
 fi
-echo "Takes ~25 minutes on an $REF_HW for everything, plus downloads."
+EST_MIN=0
+for t in "${TESTS[@]}"; do
+  IFS='|' read -r id label model extra steps runs peak ref ref_step <<<"$t"
+  case " $RUN_IDS " in *" $id "*) EST_MIN="$(num "$EST_MIN + $runs * ($ref + 5) / 60")" ;; esac
+done
+echo "Each test runs 3 times. On an $REF_HW this takes ~$(printf "%.0f" "$EST_MIN") min; slower chips take longer."
 [ $DRY_RUN -eq 1 ] && exit 0
 if [ -n "$DOWNLOADS" ] && [ $YES -eq 0 ]; then
   if [ -t 0 ]; then
@@ -189,7 +194,7 @@ JSON_ITEMS=()
 for t in "${TESTS[@]}"; do
   IFS='|' read -r id label model extra steps runs peak ref ref_step <<<"$t"
   case " $RUN_IDS " in *" $id "*) ;; *)
-    TABLE="$TABLE| $label | skipped: needs ~$peak GB | | | $ref s |\n"
+    TABLE="$TABLE| $label | skipped: needs ~$peak GB | | | | $ref s |\n"
     JSON_ITEMS+=("{\"test\": \"$id\", \"label\": \"$label\", \"model\": \"$model\", \"status\": \"skipped\", \"needs_gb\": $peak}")
     continue ;;
   esac
@@ -197,7 +202,7 @@ for t in "${TESTS[@]}"; do
   case "$extra" in
     *REF*)
       if [ -z "$REF_IMAGE" ]; then
-        TABLE="$TABLE| $label | skipped: no reference image | | | $ref s |\n"
+        TABLE="$TABLE| $label | skipped: no reference image | | | | $ref s |\n"
         JSON_ITEMS+=("{\"test\": \"$id\", \"label\": \"$label\", \"model\": \"$model\", \"status\": \"skipped\", \"reason\": \"no reference image\"}")
         continue
       fi
@@ -212,7 +217,7 @@ for t in "${TESTS[@]}"; do
       --width 512 --height 512 --num-steps 1 --output "$WORK/warmup-$model.png"
     WARMED="$WARMED $model"
   fi
-  best="" worst="" runs_json=""
+  ok_runs="" runs_json="" max_peak=0 max_swap=0
   for n in $(seq 1 "$runs"); do
     echo "$label, run $n of $runs..."
     run_mixel "$WORK/$id-$n.log" "${args[@]}"
@@ -224,23 +229,26 @@ for t in "${TESTS[@]}"; do
     fi
     echo "  ${R_IMAGE} s (${R_STEP} s/step), peak ${R_PEAK} GB"
     runs_json="$runs_json{\"load_s\": ${R_LOAD:-null}, \"text_s\": $R_TEXT, \"init_image_s\": $R_INIT, \"denoise_s\": $R_DENOISE, \"per_step_s\": $R_STEP, \"vae_s\": $R_VAE, \"image_s\": $R_IMAGE, \"peak_gb\": ${R_PEAK:-null}, \"swap_gb\": $R_SWAP}, "
-    if [ -z "$best" ] || awk "BEGIN { exit !($R_IMAGE < $best) }"; then
-      best=$R_IMAGE best_step=$R_STEP best_peak=$R_PEAK best_swap=$R_SWAP
-    fi
-    if [ -z "$worst" ] || awk "BEGIN { exit !($R_IMAGE > $worst) }"; then
-      worst=$R_IMAGE
-    fi
+    ok_runs="$ok_runs$R_IMAGE $R_STEP"$'\n'
+    max_peak="$(awk "BEGIN { print ($R_PEAK > $max_peak ? $R_PEAK : $max_peak) }")"
+    max_swap="$(awk "BEGIN { print ($R_SWAP > $max_swap ? $R_SWAP : $max_swap) }")"
   done
   [ "$id" = fast ] && [ -f "$WORK/fast.png" ] && REF_IMAGE="$WORK/fast.png"
   runs_json="[${runs_json%, }]"
-  if [ -z "$best" ]; then
-    TABLE="$TABLE| $label | failed | | | $ref s |\n"
+  if [ -z "$ok_runs" ]; then
+    TABLE="$TABLE| $label | failed | | | | $ref s |\n"
     status=failed
   else
+    # Median run (by time per image), and the range over all runs.
+    sorted="$(printf "%s" "$ok_runs" | sort -n)"
+    count="$(printf "%s\n" "$sorted" | wc -l | tr -d ' ')"
+    read -r med med_step <<<"$(printf "%s\n" "$sorted" | sed -n "$(((count + 1) / 2))p")"
+    lo="$(printf "%s\n" "$sorted" | head -1 | cut -d' ' -f1)"
+    hi="$(printf "%s\n" "$sorted" | tail -1 | cut -d' ' -f1)"
     note=""
-    awk "BEGIN { exit !($best_swap > 0.5) }" && note=" (swapped ${best_swap} GB)"
-    awk "BEGIN { exit !($worst > 1.2 * $best) }" && note="$note (runs varied: up to $worst s)"
-    TABLE="$TABLE| $label | **$best s**$note | $best_step s | $best_peak GB | $ref s |\n"
+    [ "$count" -lt "$runs" ] && note=" ($count of $runs runs)"
+    awk "BEGIN { exit !($max_swap > 0.5) }" && note="$note (swapped ${max_swap} GB)"
+    TABLE="$TABLE| $label | **$med s**$note | $lo-$hi s | $med_step s | $max_peak GB | $ref s |\n"
     status=ok
   fi
   JSON_ITEMS+=("{\"test\": \"$id\", \"label\": \"$label\", \"model\": \"$model\", \"steps\": $steps, \"status\": \"$status\", \"reference_image_s\": $ref, \"runs\": $runs_json}")
@@ -275,8 +283,8 @@ REPORT="$OUT/mixel-benchmark-$SAFE_LABEL-$(date +%Y-%m-%d).md"
   echo
   echo "## Results"
   echo
-  echo "| Test | Time per image | Per step | Peak memory | Reference* |"
-  echo "|---|---:|---:|---:|---:|"
+  echo "| Test | Time per image (median) | Range | Per step | Peak memory | Reference* |"
+  echo "|---|---:|---:|---:|---:|---:|"
   printf "%b" "$TABLE"
   echo
   echo "\\* The same test on an $REF_HW, for comparison."
@@ -284,18 +292,18 @@ REPORT="$OUT/mixel-benchmark-$SAFE_LABEL-$(date +%Y-%m-%d).md"
   echo "## How to read this"
   echo
   echo "- **Time per image**: generating one image with the model already loaded (text encoding,"
-  echo "  denoising, VAE decoding), best of the runs (3 for the short tests, 1 for the 40-step"
-  echo "  ones). Loading the model adds a few seconds per run of mixel; the first run of a model"
-  echo "  also downloads it. \"Runs varied\" marks tests whose slowest run took over 20% longer"
-  echo "  than the best, usually because another app was using the GPU; treat those as noisy."
+  echo "  denoising, VAE decoding): the median of 3 runs back to back, with no pause, as in a"
+  echo "  batch. **Range** is the fastest and slowest of them: a Mac slows down as it heats up,"
+  echo "  so a wide range mostly shows how much this one throttles under sustained load. Loading"
+  echo "  the model adds a few seconds per run of mixel; the first run of a model also downloads it."
   echo "- **Per step**: denoising time per step, the part that grows with the step count: Z-Image-Turbo"
   echo "  runs 9 steps, Qwen-Image-2.1 fast 4 and Qwen-Image-2.1 40."
   echo "- **Peak memory**: the most memory mixel used (1 GB = 2^30 bytes, as Apple counts RAM)."
   echo "  Tests that need more than 85% of this Mac's memory are skipped. \"Swapped\" means macOS"
   echo "  moved memory to disk during the test, which makes it slower than the chip can do."
   echo "- **Settings**: prompt \"$PROMPT\" (edits: \"$EDIT_PROMPT\","
-  echo "  on the fast test's image), seed $SEED. Long runs heat up the chip, and a warm Mac runs"
-  echo "  a little slower, so the 40-step tests are slower per step than the short ones."
+  echo "  on the fast test's image), seed $SEED. The tests run in the order above, so the later"
+  echo "  ones start on an already warm Mac."
   echo
   echo "## Raw data"
   echo

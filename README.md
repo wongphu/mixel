@@ -156,7 +156,7 @@ We're collecting mixel timings across Macs. If you can spare the time, run:
 
 ```bash
 scripts/benchmark.sh --dry-run   # what would run, and download, on this Mac
-scripts/benchmark.sh             # run it: ~25 min on an M3 Max
+scripts/benchmark.sh             # run it: ~55 min on an M3 Max
 ```
 
 It runs each test that fits in your Mac's memory: Z-Image-Turbo at 512×512 and 1024×1024,
