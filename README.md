@@ -10,7 +10,7 @@ them also in a 4-step variant:
 | `qwen-image-2.1` | [Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1) | 40 | ~7 min | text-to-image, img2img, **editing with reference images** |
 | `qwen-image-2.1-fast` | Qwen-Image-2.1 + [4-step Fun-Acc LoRA](https://huggingface.co/alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs) | 4 (fixed) | ~40 s | the same, slightly softer fine detail |
 
-Times are for an M3 Max with the weights already in memory; an edit with a ~1024×1024
+Times are for an M3 Max (30-core GPU, 96 GB) with the weights already in memory; an edit with a ~1024×1024
 reference image takes ~8 min (40 steps) or ~55 s (4 steps). Both are ports: Z-Image of
 candle-transformers' `z_image` (`src/zimage/`), Qwen-Image-2.1 of the diffusers pipeline and
 transformers' Qwen3-VL (`src/qwen21/`). The CLI, JSONL batch mode and seeding match
@@ -31,6 +31,7 @@ mixel --model qwen-fast --ref-image fox.png --prompt "Turn the fox into a gray w
 - Width/height must be multiples of 16 (Z-Image) or 32 (Qwen-Image). `--model-path <dir>`
   uses local weights (the 4-step adapter still comes from the Hugging Face cache).
 - Each run prints a timing breakdown: text encoding, init image, denoising, VAE.
+- Please [benchmark your Mac](#benchmark-your-mac) and send us the report.
 
 ## For AI agents and scripts
 
@@ -149,9 +150,29 @@ fields fall back to the CLI flags (the model is chosen with `--model` for the wh
 validated before the model loads, existing outputs are skipped (`--overwrite` to redo),
 and failed lines are reported at the end. Same behavior as `candy`.
 
+## Benchmark your Mac
+
+We're collecting mixel timings across Macs. If you can spare the time, run:
+
+```bash
+scripts/benchmark.sh --dry-run   # what would run, and download, on this Mac
+scripts/benchmark.sh             # run it: ~25 min on an M3 Max
+```
+
+It runs each test that fits in your Mac's memory: Z-Image-Turbo at 512×512 and 1024×1024,
+and Qwen-Image-2.1 in 4 and 40 steps, text-to-image and an edit. It asks before downloading
+weights. The result is one file, `mixel-benchmark-<chip>-<gpu>-<memory>-<date>.md`, labelled
+with your Mac, chip, CPU and GPU cores, memory, macOS version and power source, with a table
+to read and a JSON block for us to compile.
+
+**Please email it to [mixelate@proton.me](mailto:mixelate@proton.me).** It holds only the
+hardware summary and the timings: no serial numbers, hostnames, user names or images. For
+steadier numbers, plug in, close other apps and leave the Mac alone while it runs.
+[`benchmarks/`](benchmarks/) has the reference report from an M3 Max.
+
 ## mixel vs candy
 
-Apple M3 Max, same prompt and seed, weights already cached. candy's column is from the
+Apple M3 Max (30-core GPU, 96 GB), same prompt and seed, weights already cached. candy's column is from the
 original comparison; mixel's was re-measured on 2026-09-30:
 
 | | candy (candle 0.11) | mixel (mlx-rs 0.32) |

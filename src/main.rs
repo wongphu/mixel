@@ -46,8 +46,8 @@ const GUIDE: &str = "\
 USAGE GUIDE (for scripts and AI agents)
 
 Choosing a model:
-  z-image-turbo (default)  Fast: ~60 s for 1024x1024 on an M3 Max. Use for
-                           text-to-image and img2img.
+  z-image-turbo (default)  ~60 s for 1024x1024 on an M3 Max (30-core GPU).
+                           Use for text-to-image and img2img.
   qwen-image-2.1-fast      ~40 s for 1024x1024, ~55 s for an edit (4 steps).
   (alias qwen-fast)        Use to edit existing images (--ref-image). Fine
                            detail and small text are a little softer than
