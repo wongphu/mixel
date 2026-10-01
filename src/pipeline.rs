@@ -25,7 +25,7 @@ pub enum Model {
     /// with reference images.
     QwenImage21,
     /// Qwen-Image-2.1 with the 4-step Fun-Acc adapter ([`crate::qwen21::fast`]):
-    /// the same tasks ~10x faster, with slightly softer fine detail.
+    /// the same tasks 7-10x faster, with slightly softer fine detail.
     QwenImage21Fast,
 }
 

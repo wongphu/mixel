@@ -24,7 +24,7 @@ enum ModelArg {
     /// Qwen-Image-2.1: slower (40 steps); also edits with --ref-image
     #[value(name = "qwen-image-2.1", alias = "qwen")]
     QwenImage21,
-    /// Qwen-Image-2.1 in 4 steps (Fun-Acc adapter): ~10x faster, slightly
+    /// Qwen-Image-2.1 in 4 steps (Fun-Acc adapter): 7-10x faster, slightly
     /// softer fine detail; also edits with --ref-image
     #[value(name = "qwen-image-2.1-fast", alias = "qwen-fast")]
     QwenImage21Fast,
@@ -46,13 +46,13 @@ const GUIDE: &str = "\
 USAGE GUIDE (for scripts and AI agents)
 
 Choosing a model:
-  z-image-turbo (default)  ~60 s for 1024x1024 on an M3 Max (30-core GPU).
+  z-image-turbo (default)  ~59 s for 1024x1024 on an M3 Max (30-core GPU).
                            Use for text-to-image and img2img.
-  qwen-image-2.1-fast      ~40 s for 1024x1024, ~55 s for an edit (4 steps).
+  qwen-image-2.1-fast      ~37 s for 1024x1024, ~64 s for an edit (4 steps).
   (alias qwen-fast)        Use to edit existing images (--ref-image). Fine
                            detail and small text are a little softer than
                            with qwen-image-2.1.
-  qwen-image-2.1           ~7 min for 1024x1024, ~8 min for an edit (40
+  qwen-image-2.1           ~6 min for 1024x1024, ~7.5 min for an edit (40
                            steps). Use when the fast variant's detail is
                            not enough.
   Both Qwen variants' weights are for research, not commercial use.
@@ -104,8 +104,8 @@ empty prompt without one); a negative prompt alone is rejected.
 qwen-image-2.1 turns it on above 1 and needs a negative prompt.
 
 Running it:
-  - Per 1024x1024 image: ~1 min (z-image-turbo), ~40-55 s
-    (qwen-image-2.1-fast) or 7-8 min (qwen-image-2.1), plus a few seconds
+  - Per 1024x1024 image: ~1 min (z-image-turbo), ~37-64 s
+    (qwen-image-2.1-fast) or 6-7.5 min (qwen-image-2.1), plus a few seconds
     of model loading once the weights are cached. The first run downloads
     ~33 GB (z-image-turbo) or ~31 GB (qwen models; the fast variant adds
     0.35 GB) to ~/.cache/huggingface. Use long timeouts or run it in the
@@ -113,8 +113,9 @@ Running it:
   - qwen-image-2.1-fast always runs 4 steps without guidance: --num-steps
     other than 4, or --guidance-scale above 1 with a negative prompt, is
     rejected.
-  - Needs Apple Silicon and lots of memory: ~39 GB peak for z-image-turbo
-    at 1024x1024, ~55-70 GB for the qwen models. Run one mixel at a time.
+  - Needs Apple Silicon and lots of memory: ~36 GB peak for z-image-turbo
+    at 1024x1024, ~52-65 GB for the qwen models (GB = 2^30 bytes). Run one
+    mixel at a time.
   - Arguments and every batch line are validated before the model loads,
     so mistakes fail within a second.
   - Exit status 0 on success; non-zero on invalid input, a failed image,

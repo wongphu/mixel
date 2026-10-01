@@ -6,12 +6,14 @@ them also in a 4-step variant:
 
 | `--model` | Model | Default steps | 1024×1024 image | Can do |
 |---|---|---:|---:|---|
-| `z-image-turbo` (default) | [Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | 9 | ~60 s | text-to-image, img2img |
-| `qwen-image-2.1` | [Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1) | 40 | ~7 min | text-to-image, img2img, **editing with reference images** |
-| `qwen-image-2.1-fast` | Qwen-Image-2.1 + [4-step Fun-Acc LoRA](https://huggingface.co/alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs) | 4 (fixed) | ~40 s | the same, slightly softer fine detail |
+| `z-image-turbo` (default) | [Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | 9 | ~59 s | text-to-image, img2img |
+| `qwen-image-2.1` | [Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1) | 40 | ~6 min | text-to-image, img2img, **editing with reference images** |
+| `qwen-image-2.1-fast` | Qwen-Image-2.1 + [4-step Fun-Acc LoRA](https://huggingface.co/alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs) | 4 (fixed) | ~37 s | the same, slightly softer fine detail |
 
-Times are for an M3 Max (30-core GPU, 96 GB) with the weights already in memory; an edit with a ~1024×1024
-reference image takes ~8 min (40 steps) or ~55 s (4 steps). Both are ports: Z-Image of
+Times are medians from the [reference benchmark](benchmarks/) on an M3 Max (30-core GPU,
+96 GB), with the weights already in memory; an edit with a ~1024×1024 reference image takes
+~7.5 min (40 steps) or ~64 s (4 steps). Memory figures count GB as Apple does (2^30 bytes).
+Both are ports: Z-Image of
 candle-transformers' `z_image` (`src/zimage/`), Qwen-Image-2.1 of the diffusers pipeline and
 transformers' Qwen3-VL (`src/qwen21/`). The CLI, JSONL batch mode and seeding match
 [`candy`](https://github.com/wongphu/candle-diffusion), the candle version, but Z-Image
@@ -42,7 +44,7 @@ timings, memory, and exit codes. Rules of thumb:
 - Always pass `--prompt`, `--seed` and `--output` (or `id`s in JSONL) so the output path is known up front.
 - Generate several images with one `--input` JSONL run; the model loads once.
 - Allow minutes per image (more on the first run, which downloads the weights) and run one
-  `mixel` at a time: it needs 39–70 GB of memory.
+  `mixel` at a time: it needs 27–65 GB of memory.
 
 ## Editing with reference images (Qwen-Image-2.1)
 
@@ -64,9 +66,9 @@ reference-image token.
 `--model qwen-image-2.1-fast` (or `qwen-fast`) adds Alibaba PAI's
 [Fun-Acc LoRA](https://huggingface.co/alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs), distilled
 with Parallel Decoding Distillation, to the same base weights: text-to-image, img2img and
-editing run in 4 steps instead of 40: a 1024×1024 image takes ~40 s instead of ~7 min, an
-edit ~55 s instead of ~8 min. A step costs the same as the base model's, so the gain is the
-step count.
+editing run in 4 steps instead of 40: a 1024×1024 image takes ~37 s instead of ~6 min, an
+edit ~64 s instead of ~7.5 min. A step costs about the same as the base model's, so the gain
+is the step count.
 
 - It always runs its fixed 4-step schedule (`1.0, 0.917, 0.786, 0.549, 0`), without guidance:
   other `--num-steps`, or a negative prompt with `--guidance-scale` above 1, are rejected.
@@ -156,7 +158,7 @@ We're collecting mixel timings across Macs. If you can spare the time, run:
 
 ```bash
 scripts/benchmark.sh --dry-run   # what would run, and download, on this Mac
-scripts/benchmark.sh             # run it: ~55 min on an M3 Max
+scripts/benchmark.sh             # run it: ~50 min on an M3 Max
 ```
 
 It runs each test that fits in your Mac's memory: Z-Image-Turbo at 512×512 and 1024×1024,
@@ -173,15 +175,15 @@ steadier numbers, plug in, close other apps and leave the Mac alone while it run
 ## mixel vs candy
 
 Apple M3 Max (30-core GPU, 96 GB), same prompt and seed, weights already cached. candy's column is from the
-original comparison; mixel's was re-measured on 2026-09-30:
+original comparison; mixel's is from the [reference benchmark](benchmarks/):
 
 | | candy (candle 0.11) | mixel (mlx-rs 0.32) |
 |---|---:|---:|
 | 512×512 image | 22.2 s | **13.2 s** |
-| 1024×1024 image | ~127 s | **60 s** |
-| 1024×1024: denoising | ~10.3 s/step | **6.5 s/step** |
+| 1024×1024 image | ~127 s | **59 s** |
+| 1024×1024: denoising | ~10.3 s/step | **6.4 s/step** |
 | 1024×1024: VAE decode | ~35 s | **1.4 s** |
-| Peak memory, 1024×1024 | 81 GB | **39 GB** |
+| Peak memory, 1024×1024 | 81 GB | **36 GB** |
 
 candy's phase split is measured from its log timestamps (candle queues GPU work
 asynchronously, so treat it as approximate). The VAE gap matches MLX's much faster 3×3
@@ -236,10 +238,11 @@ returns zeros at 256 px and up (an 8-D reshape/permute), so diffusers' Qwen-Imag
 image encoding, and with it editing, is wrong on Apple GPUs. mixel isn't affected; the
 reference script works around it by running that module on the CPU.
 
-**Speed.** 1024×1024, 40 steps: 10.4 s/step (419 s per image, 55 GB peak) against 11.9
+**Speed.** 1024×1024, 40 steps: 9.3 s/step (373 s per image, 52 GB peak) against 11.9
 s/step for diffusers on the same M3 Max (measured in an earlier comparison). An edit with one
-~1024×1024 reference image: 12.0 s/step (494 s, 69 GB peak). The first few steps of a run
-take ~8 s each; the GPU slows under sustained load, so long runs average more per step. The
+~1024×1024 reference image: 10.7 s/step (445 s, 64 GB peak). These are medians of 3 runs back
+to back; the GPU slows as it heats under sustained load, so later runs take longer (349–375 s
+for the 40-step image). The
 text and reference-image tokens are computed once per image and cached (as in the
 reference), so each step only runs the target tokens.
 
