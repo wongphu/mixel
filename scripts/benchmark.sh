@@ -18,6 +18,13 @@
 # numbers, hostnames, user names, or images.
 set -u
 
+# Keep the Mac awake: an idle Mac sleeps and only wakes for minutes at a
+# time, so a 1-hour benchmark can take all night. (Closing the lid still
+# sleeps it.)
+if [ -z "${MIXEL_BENCHMARK_AWAKE:-}" ] && command -v caffeinate >/dev/null; then
+  MIXEL_BENCHMARK_AWAKE=1 exec caffeinate -i "$0" "$@"
+fi
+
 REPORT_EMAIL="mixelate@proton.me"
 PROMPT="A red fox sitting in fresh snow, wildlife photography"
 EDIT_PROMPT="Turn the fox into a gray wolf"
