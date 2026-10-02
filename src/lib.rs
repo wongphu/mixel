@@ -21,6 +21,6 @@ pub mod zimage;
 
 pub use nn::Quantize;
 pub use pipeline::{
-    composite_over_white, seeded_noise, GenerateOptions, Generated, LoadOptions, Model, Pipeline,
-    Progress, Timings, DEFAULT_REPO, DEFAULT_STEPS, SIZE_ALIGN,
+    composite_over_white, seeded_noise, Encoded, GenerateOptions, Generated, LoadOptions, Model,
+    Parts, Pipeline, Progress, Timings, DEFAULT_REPO, DEFAULT_STEPS, SIZE_ALIGN,
 };

@@ -1,13 +1,14 @@
-//! Where the memory goes: MLX's active, cached and peak memory after loading
-//! and in each phase of one image. `mixel::Pipeline` turns MLX's buffer cache
-//! off; a cache limit in GiB turns it back on after loading.
+//! Where the memory goes: MLX's active, cached and peak memory in each phase
+//! of one image, loaded in two parts like the mixel command. `mixel::Pipeline`
+//! turns MLX's buffer cache off; a cache limit in GiB turns it back on after
+//! loading.
 //!
 //! ```bash
 //! cargo run --release --example memory -- [model] [size] [bf16|8|4] [cache limit GiB] [output.png]
 //! ```
 
 use anyhow::Result;
-use mixel::{GenerateOptions, LoadOptions, Model, Pipeline, Progress, Quantize};
+use mixel::{GenerateOptions, LoadOptions, Model, Parts, Pipeline, Progress, Quantize};
 use mlx_rs::memory::{active_memory, cache_memory, peak_memory, reset_peak_memory};
 
 fn gib(bytes: usize) -> f64 {
@@ -42,29 +43,39 @@ fn main() -> Result<()> {
         Some(other) => anyhow::bail!("unknown quantization {other}"),
     };
 
-    let pipeline = Pipeline::load(&LoadOptions {
-        model,
-        quantize,
-        ..Default::default()
-    })?;
-    report("load");
-    // After loading, which turns the cache off.
-    if let Some(limit) = args.get(4) {
-        let gib: f64 = limit.parse()?;
-        mlx_rs::memory::set_cache_limit((gib * (1u64 << 30) as f64) as usize)?;
-    }
-
+    let load = |parts| {
+        Pipeline::load(&LoadOptions {
+            model,
+            quantize,
+            parts,
+            ..Default::default()
+        })
+    };
     let opts = GenerateOptions {
         seed: 1,
         width: size,
         height: size,
         ..GenerateOptions::for_model(model, "a red fox in fresh snow")
     };
+
+    // Like the mixel command: the encoders, then the transformer and VAE.
+    let encoders = load(Parts::Encoders)?;
+    report("load enc");
+    let encoded = encoders.encode(&opts)?;
+    report("encode");
+    drop(encoders);
+    let pipeline = load(Parts::Generator)?;
+    report("load gen");
+    // After loading, which turns the cache off.
+    if let Some(limit) = args.get(4) {
+        let gib: f64 = limit.parse()?;
+        mlx_rs::memory::set_cache_limit((gib * (1u64 << 30) as f64) as usize)?;
+    }
+
     let mut steps_reported = false;
-    let out = pipeline.generate_with(&opts, |p| match p {
-        Progress::Encoded { .. } => report("tokenized"),
+    let out = pipeline.generate_encoded_with(&opts, &encoded, |p| match p {
         Progress::Step { step, .. } if step == 1 && !steps_reported => {
-            report("text+step 1");
+            report("step 1");
             steps_reported = true;
         }
         Progress::Decoding => report("steps 2..n"),

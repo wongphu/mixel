@@ -10,81 +10,117 @@ use super::vision::VisionEncoder;
 use super::{scheduler, OUTPUT_RESOLUTION, VAE_SCALE};
 use crate::nn::{ModelFiles, Quantize};
 use crate::pipeline::{
-    composite_over_white, resize_to_fill, seeded_noise, GenerateOptions, Generated, Progress,
-    Timings,
+    composite_over_white, resize_to_fill, seeded_noise, GenerateOptions, Generated, Parts,
+    Progress, Timings,
 };
 use anyhow::{Error as E, Result};
 use mlx_rs::{Array, Dtype};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
 
 const TEXT_ENCODER_SHARDS: usize = 4;
 const TRANSFORMER_SHARDS: usize = 2;
 
-/// Qwen-Image-2.1's models.
+/// Qwen-Image-2.1's models, or the [`Parts`] of them that were loaded.
 pub struct QwenPipeline {
     dtype: Dtype,
     tokenizer: Tokenizer,
     image_pad_id: u32,
-    text_encoder: TextEncoder,
-    vision: VisionEncoder,
-    transformer: Transformer,
-    vae: Vae,
+    text_encoder: Option<TextEncoder>,
+    vision: Option<VisionEncoder>,
+    transformer: Option<Transformer>,
+    vae: Option<Vae>,
     /// With the 4-step adapter: its fixed schedule.
     fast_sigmas: Option<Vec<f32>>,
 }
 
-/// A reference image prepared once for both encoders.
+/// A reference image, resized once for both encoders.
 struct Reference {
     /// Resized image for the VAE, alpha included.
     rgba: image::RgbaImage,
-    /// The same composited over white, for the vision encoder.
-    rgb: image::RgbImage,
     /// Latent grid (height, width) in 16 px tokens.
     grid: (usize, usize),
 }
 
+/// One image's prompt embeddings, from [`QwenPipeline::encode`].
+pub struct Encoded {
+    txt: Array,
+    pos: EncodedPrompt,
+    /// With guidance: the negative prompt's embeddings.
+    neg: Option<(Array, EncodedPrompt)>,
+    refs: Vec<Reference>,
+    /// Prompt tokens, image slots included.
+    pub tokens: usize,
+    pub took: Duration,
+}
+
+impl Encoded {
+    /// Memory the embeddings and resized reference images take.
+    pub fn nbytes(&self) -> usize {
+        self.txt.nbytes()
+            + self.neg.as_ref().map_or(0, |(n, _)| n.nbytes())
+            + self
+                .refs
+                .iter()
+                .map(|r| r.rgba.as_raw().len())
+                .sum::<usize>()
+    }
+}
+
 impl QwenPipeline {
-    /// Loads the base model, with the 4-step adapter applied if given, and the
-    /// text encoder and transformer quantized if `quantize` is set.
+    /// Loads the tokenizer and the given `parts`: the text and vision
+    /// encoders, and the transformer (with the 4-step adapter applied if
+    /// given) and VAE, with the text encoder and transformer quantized if
+    /// `quantize` is set.
     pub fn load(
         files: &ModelFiles,
         adapter: Option<&ModelFiles>,
         quantize: Option<Quantize>,
+        parts: Parts,
     ) -> Result<Self> {
         let dtype = Dtype::Bfloat16;
         let tokenizer =
             Tokenizer::from_file(files.get("processor/tokenizer.json")?).map_err(E::msg)?;
         let image_pad_id = prompt::image_pad_id(&tokenizer)?;
-        let te_files = (1..=TEXT_ENCODER_SHARDS)
-            .map(|i| {
-                files.get(&format!(
-                    "text_encoder/model-{i:05}-of-{TEXT_ENCODER_SHARDS:05}.safetensors"
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let text_encoder = TextEncoder::load(&te_files, dtype, quantize)?;
-        // The vision encoder is small (0.4B) and runs in f32: in bf16 its output
-        // drifts ~6% from f32, which the text encoder amplifies ~4x.
-        let vision = VisionEncoder::load(&te_files, Dtype::Float32)?;
-        let tr_files = (1..=TRANSFORMER_SHARDS)
-            .map(|i| {
-                files.get(&format!(
-                    "transformer/diffusion_pytorch_model-{i:05}-of-{TRANSFORMER_SHARDS:05}.safetensors"
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let mut transformer = Transformer::load(&tr_files, dtype, quantize)?;
-        let fast_sigmas = match adapter {
-            Some(files) => {
-                let adapter = Adapter::load(files, dtype)?;
-                let sigmas = adapter.sigmas.clone();
-                transformer.apply_adapter(adapter)?;
-                Some(sigmas)
-            }
-            None => None,
+        let (text_encoder, vision) = if parts.encoders() {
+            let te_files = (1..=TEXT_ENCODER_SHARDS)
+                .map(|i| {
+                    files.get(&format!(
+                        "text_encoder/model-{i:05}-of-{TEXT_ENCODER_SHARDS:05}.safetensors"
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let text_encoder = TextEncoder::load(&te_files, dtype, quantize)?;
+            // The vision encoder is small (0.4B) and runs in f32: in bf16 its
+            // output drifts ~6% from f32, which the text encoder amplifies ~4x.
+            let vision = VisionEncoder::load(&te_files, Dtype::Float32)?;
+            (Some(text_encoder), Some(vision))
+        } else {
+            (None, None)
         };
-        let vae = Vae::load(files.get("vae/diffusion_pytorch_model.safetensors")?, dtype)?;
+        let (transformer, vae, fast_sigmas) = if parts.generator() {
+            let tr_files = (1..=TRANSFORMER_SHARDS)
+                .map(|i| {
+                    files.get(&format!(
+                        "transformer/diffusion_pytorch_model-{i:05}-of-{TRANSFORMER_SHARDS:05}.safetensors"
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let mut transformer = Transformer::load(&tr_files, dtype, quantize)?;
+            let fast_sigmas = match adapter {
+                Some(files) => {
+                    let adapter = Adapter::load(files, dtype)?;
+                    let sigmas = adapter.sigmas.clone();
+                    transformer.apply_adapter(adapter)?;
+                    Some(sigmas)
+                }
+                None => None,
+            };
+            let vae = Vae::load(files.get("vae/diffusion_pytorch_model.safetensors")?, dtype)?;
+            (Some(transformer), Some(vae), fast_sigmas)
+        } else {
+            (None, None, None)
+        };
         mlx_rs::memory::clear_cache()?;
         Ok(Self {
             dtype,
@@ -103,10 +139,18 @@ impl QwenPipeline {
         opts: &GenerateOptions,
         on_progress: &mut dyn FnMut(Progress),
     ) -> Result<Generated> {
+        let encoded = self.encode(opts)?;
+        self.generate_encoded(opts, &encoded, on_progress)
+    }
+
+    /// The prompt's embeddings with the reference images seen by the vision
+    /// encoder, and with guidance the negative prompt's. Needs the encoders.
+    pub fn encode(&self, opts: &GenerateOptions) -> Result<Encoded> {
+        let (text_encoder, vision_encoder) = match (&self.text_encoder, &self.vision) {
+            (Some(t), Some(v)) => (t, v),
+            _ => anyhow::bail!("this pipeline was loaded without its text and vision encoders"),
+        };
         let started = Instant::now();
-        let (w, h) = (opts.width, opts.height);
-        let (lh, lw) = (h / VAE_SCALE, w / VAE_SCALE);
-        let n_tokens = lh * lw;
 
         // Reference images: each resized to ~1024^2 px at its own aspect ratio,
         // like the reference pipeline, for both the vision encoder and the VAE.
@@ -122,23 +166,18 @@ impl QwenPipeline {
                     image::imageops::FilterType::Lanczos3,
                 );
                 Reference {
-                    rgb: composite_over_white(&rgba),
                     rgba,
                     grid: (rh / VAE_SCALE, rw / VAE_SCALE),
                 }
             })
             .collect();
 
-        // Text (and vision) encoding, then the step-independent prefix.
         let vision: Vec<_> = refs
             .iter()
-            .map(|r| self.vision.encode(&r.rgb))
+            .map(|r| vision_encoder.encode(&composite_over_white(&r.rgba)))
             .collect::<Result<_>>()?;
         let grids: Vec<(usize, usize)> = vision.iter().map(|f| f.grid).collect();
         let pos = prompt::encode(&self.tokenizer, &opts.prompt, &grids)?;
-        on_progress(Progress::Encoded {
-            tokens: pos.ids.len(),
-        });
         let embeds = |p: &EncodedPrompt| -> Result<Array> {
             let images: Vec<ImageEmbeds> = vision
                 .iter()
@@ -153,7 +192,7 @@ impl QwenPipeline {
                         .collect(),
                 })
                 .collect();
-            let hs = self.text_encoder.forward(&p.ids, &p.positions, &images)?;
+            let hs = text_encoder.forward(&p.ids, &p.positions, &images)?;
             let kept = split_off_front(&hs, p.drop as i32)?;
             kept.eval()?;
             Ok(kept)
@@ -165,19 +204,47 @@ impl QwenPipeline {
         } else {
             None
         };
-        let encoded = Instant::now();
+        Ok(Encoded {
+            txt,
+            tokens: pos.ids.len(),
+            pos,
+            neg,
+            refs,
+            took: started.elapsed(),
+        })
+    }
 
-        // VAE: reference latents, and the init image for img2img.
+    /// Generates from [`encode`](Self::encode)'s output for the same
+    /// options. Needs the transformer and VAE.
+    pub fn generate_encoded(
+        &self,
+        opts: &GenerateOptions,
+        encoded: &Encoded,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> Result<Generated> {
+        let (transformer, vae) = match (&self.transformer, &self.vae) {
+            (Some(t), Some(v)) => (t, v),
+            _ => anyhow::bail!("this pipeline was loaded without its transformer and VAE"),
+        };
+        on_progress(Progress::Encoded {
+            tokens: encoded.tokens,
+        });
+        let started = Instant::now();
+        let (w, h) = (opts.width, opts.height);
+        let (lh, lw) = (h / VAE_SCALE, w / VAE_SCALE);
+        let n_tokens = lh * lw;
+        let refs = &encoded.refs;
+
+        // VAE: reference latents, and the init image for img2img; then the
+        // step-independent prefix.
         let ref_latents: Vec<Array> = refs
             .iter()
-            .map(|r| self.encode_image(&r.rgba, r.grid))
+            .map(|r| self.encode_image(vae, &r.rgba, r.grid))
             .collect::<Result<_>>()?;
-        let segments = |p: &EncodedPrompt| segments(p, self.image_pad_id, &refs);
-        let cache = self
-            .transformer
-            .prefill(&txt, &ref_latents, &segments(&pos)?)?;
-        let neg_cache = match &neg {
-            Some((t, p)) => Some(self.transformer.prefill(t, &ref_latents, &segments(p)?)?),
+        let segments = |p: &EncodedPrompt| segments(p, self.image_pad_id, refs);
+        let cache = transformer.prefill(&encoded.txt, &ref_latents, &segments(&encoded.pos)?)?;
+        let neg_cache = match &encoded.neg {
+            Some((t, p)) => Some(transformer.prefill(t, &ref_latents, &segments(p)?)?),
             None => None,
         };
 
@@ -195,7 +262,7 @@ impl QwenPipeline {
             Some(img) => {
                 let start = scheduler::start_index(opts.num_steps, opts.strength);
                 let init = image::DynamicImage::from(resize_to_fill(img, w as u32, h as u32));
-                let init = self.encode_image(&init.to_rgba8(), (lh, lw))?;
+                let init = self.encode_image(vae, &init.to_rgba8(), (lh, lw))?;
                 let sigma = sigmas[start];
                 let x = noise.multiply(Array::from_f32(sigma))?.add(
                     init.as_dtype(Dtype::Float32)?
@@ -211,10 +278,10 @@ impl QwenPipeline {
             let t = timestep(sigmas[step]);
             // The adapter keeps the latents in f32 (below); the model reads bf16.
             let x_in = x.as_dtype(self.dtype)?;
-            let mut v = self.transformer.forward(&x_in, t, lh, lw, &cache, step)?;
+            let mut v = transformer.forward(&x_in, t, lh, lw, &cache, step)?;
             if let Some(nc) = &neg_cache {
                 // True CFG: v = neg + scale * (pos - neg)
-                let nv = self.transformer.forward(&x_in, t, lh, lw, nc, step)?;
+                let nv = transformer.forward(&x_in, t, lh, lw, nc, step)?;
                 v = nv.add(
                     v.subtract(&nv)?
                         .multiply(crate::nn::scalar(opts.guidance_scale as f32, self.dtype)?)?,
@@ -241,7 +308,7 @@ impl QwenPipeline {
 
         let denoised = Instant::now();
         on_progress(Progress::Decoding);
-        let rgba = self.vae.decode(
+        let rgba = vae.decode(
             &x.as_dtype(self.dtype)?
                 .reshape(&[1, lh as i32, lw as i32, 64])?,
         )?;
@@ -250,8 +317,8 @@ impl QwenPipeline {
         Ok(Generated {
             image,
             timings: Timings {
-                text: encoded - started,
-                init_image: image_encoded - encoded,
+                text: encoded.took,
+                init_image: image_encoded - started,
                 denoise: denoised - image_encoded,
                 vae: denoised.elapsed(),
             },
@@ -260,7 +327,12 @@ impl QwenPipeline {
 
     /// RGBA image (already at the latent grid's pixel size) -> packed
     /// normalized latents (1, h*w, 64).
-    fn encode_image(&self, img: &image::RgbaImage, grid: (usize, usize)) -> Result<Array> {
+    fn encode_image(
+        &self,
+        vae: &Vae,
+        img: &image::RgbaImage,
+        grid: (usize, usize),
+    ) -> Result<Array> {
         let (w, h) = (img.width() as i32, img.height() as i32);
         let px: Vec<f32> = img
             .as_raw()
@@ -268,8 +340,7 @@ impl QwenPipeline {
             .map(|&c| c as f32 / 127.5 - 1.0)
             .collect();
         let x = Array::from_slice(&px, &[1, h, w, 4]).as_dtype(self.dtype)?;
-        let z = self
-            .vae
+        let z = vae
             .encode(&x)?
             .reshape(&[1, (grid.0 * grid.1) as i32, 64])?;
         z.eval()?;

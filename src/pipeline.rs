@@ -106,6 +106,36 @@ impl std::str::FromStr for Model {
     }
 }
 
+/// Which parts of a model [`Pipeline::load`] loads.
+///
+/// The text encoders only run at the start of each image, yet are a third
+/// (Z-Image-Turbo) to half (Qwen-Image-2.1, with its vision encoder) of the
+/// weights. To keep them out of memory while the transformer runs, load the
+/// [`Encoders`](Parts::Encoders), [`Pipeline::encode`] each image's options,
+/// drop that pipeline, then load the [`Generator`](Parts::Generator) and
+/// [`Pipeline::generate_encoded`] each one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Parts {
+    /// Everything: [`Pipeline::generate`] works.
+    #[default]
+    All,
+    /// The tokenizer and text encoder (and Qwen's vision encoder):
+    /// [`Pipeline::encode`] works.
+    Encoders,
+    /// The transformer and VAE: [`Pipeline::generate_encoded`] works.
+    Generator,
+}
+
+impl Parts {
+    pub(crate) fn encoders(self) -> bool {
+        self != Parts::Generator
+    }
+
+    pub(crate) fn generator(self) -> bool {
+        self != Parts::Encoders
+    }
+}
+
 /// Which model to load, from where, and on which device.
 #[derive(Debug, Clone, Default)]
 pub struct LoadOptions {
@@ -119,6 +149,8 @@ pub struct LoadOptions {
     /// Quantize the text encoder and transformer as they load, to use less
     /// memory (see [`Quantize`]).
     pub quantize: Option<Quantize>,
+    /// Which parts to load (all by default).
+    pub parts: Parts,
 }
 
 /// What to generate.
@@ -371,18 +403,24 @@ impl Pipeline {
         let repo = opts.repo.as_deref().unwrap_or(opts.model.repo());
         let files = ModelFiles::new(repo, opts.model_path.as_deref())?;
         let inner = match opts.model {
-            Model::ZImageTurbo => {
-                Inner::ZImage(Box::new(ZImagePipeline::load(&files, opts.quantize)?))
-            }
-            Model::QwenImage21 => {
-                Inner::Qwen(Box::new(QwenPipeline::load(&files, None, opts.quantize)?))
-            }
+            Model::ZImageTurbo => Inner::ZImage(Box::new(ZImagePipeline::load(
+                &files,
+                opts.quantize,
+                opts.parts,
+            )?)),
+            Model::QwenImage21 => Inner::Qwen(Box::new(QwenPipeline::load(
+                &files,
+                None,
+                opts.quantize,
+                opts.parts,
+            )?)),
             Model::QwenImage21Fast => {
                 let adapter = ModelFiles::new(crate::qwen21::fast::REPO, None)?;
                 Inner::Qwen(Box::new(QwenPipeline::load(
                     &files,
                     Some(&adapter),
                     opts.quantize,
+                    opts.parts,
                 )?))
             }
         };
@@ -417,6 +455,87 @@ impl Pipeline {
         // failures too, so they don't slow down the next image.
         mlx_rs::memory::clear_cache()?;
         result
+    }
+
+    /// Runs the text side for one image: its prompt and negative prompt
+    /// through the text encoder, and Qwen's reference images through the
+    /// vision encoder. Needs a pipeline loaded with [`Parts::All`] or
+    /// [`Parts::Encoders`]; see [`Parts`] for why.
+    pub fn encode(&self, opts: &GenerateOptions) -> Result<Encoded> {
+        opts.validate(self.model)?;
+        let inner = match &self.inner {
+            Inner::ZImage(p) => EncodedInner::ZImage(p.encode(opts)?),
+            Inner::Qwen(p) => EncodedInner::Qwen(p.encode(opts)?),
+        };
+        Ok(Encoded {
+            model: self.model,
+            inner,
+        })
+    }
+
+    /// Generates an image from [`encode`](Self::encode)'s output for the
+    /// same options. Needs a pipeline loaded with [`Parts::All`] or
+    /// [`Parts::Generator`].
+    pub fn generate_encoded(&self, opts: &GenerateOptions, encoded: &Encoded) -> Result<Generated> {
+        self.generate_encoded_with(opts, encoded, |_| {})
+    }
+
+    /// Like [`generate_encoded`](Self::generate_encoded), calling
+    /// `on_progress` as it goes.
+    pub fn generate_encoded_with(
+        &self,
+        opts: &GenerateOptions,
+        encoded: &Encoded,
+        mut on_progress: impl FnMut(Progress),
+    ) -> Result<Generated> {
+        opts.validate(self.model)?;
+        anyhow::ensure!(
+            encoded.model == self.model,
+            "encoded for {}, not {}",
+            encoded.model,
+            self.model
+        );
+        let result = match (&self.inner, &encoded.inner) {
+            (Inner::ZImage(p), EncodedInner::ZImage(e)) => {
+                p.generate_encoded(opts, e, &mut on_progress)
+            }
+            (Inner::Qwen(p), EncodedInner::Qwen(e)) => {
+                p.generate_encoded(opts, e, &mut on_progress)
+            }
+            _ => unreachable!("same model"),
+        };
+        mlx_rs::memory::clear_cache()?;
+        result
+    }
+}
+
+/// One image's prompt embeddings (and Qwen's reference images), from
+/// [`Pipeline::encode`]: small next to the models (a few MB for an edit).
+pub struct Encoded {
+    model: Model,
+    inner: EncodedInner,
+}
+
+enum EncodedInner {
+    ZImage(crate::zimage::pipeline::Encoded),
+    Qwen(crate::qwen21::pipeline::Encoded),
+}
+
+impl Encoded {
+    /// Prompt tokens (for Qwen, image slots included).
+    pub fn tokens(&self) -> usize {
+        match &self.inner {
+            EncodedInner::ZImage(e) => e.tokens,
+            EncodedInner::Qwen(e) => e.tokens,
+        }
+    }
+
+    /// Memory it takes.
+    pub fn nbytes(&self) -> usize {
+        match &self.inner {
+            EncodedInner::ZImage(e) => e.nbytes(),
+            EncodedInner::Qwen(e) => e.nbytes(),
+        }
     }
 }
 

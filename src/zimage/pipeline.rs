@@ -5,47 +5,75 @@ use super::{
     ModelFiles, Quantize,
 };
 use crate::pipeline::{
-    resize_to_fill, seeded_noise, to_rgb_image, GenerateOptions, Generated, Progress, Timings,
+    resize_to_fill, seeded_noise, to_rgb_image, GenerateOptions, Generated, Parts, Progress,
+    Timings,
 };
-use anyhow::{Error as E, Result};
+use anyhow::{Context, Error as E, Result};
 use mlx_rs::{Array, Dtype};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
 
 /// Prompts are cut to this many tokens, like diffusers' `max_sequence_length`
 /// (the transformer's RoPE tables can't go much further).
 pub const MAX_PROMPT_TOKENS: usize = 512;
 
-/// Z-Image-Turbo's models.
+/// Z-Image-Turbo's models, or the [`Parts`] of them that were loaded.
 pub struct ZImagePipeline {
     dtype: Dtype,
     tokenizer: Tokenizer,
-    text_encoder: TextEncoder,
-    transformer: Transformer,
-    vae: Vae,
+    text_encoder: Option<TextEncoder>,
+    transformer: Option<Transformer>,
+    vae: Option<Vae>,
+}
+
+/// One image's caption features, from [`ZImagePipeline::encode`].
+pub struct Encoded {
+    cap: Array,
+    /// With guidance: the negative (or empty) prompt's features.
+    neg: Option<Array>,
+    /// Prompt tokens (at most [`MAX_PROMPT_TOKENS`]).
+    pub tokens: usize,
+    pub took: Duration,
+}
+
+impl Encoded {
+    /// Memory the features take.
+    pub fn nbytes(&self) -> usize {
+        self.cap.nbytes() + self.neg.as_ref().map_or(0, |n| n.nbytes())
+    }
 }
 
 impl ZImagePipeline {
-    /// Loads the tokenizer, text encoder, transformer and VAE, with the text
-    /// encoder and transformer quantized if `quantize` is set.
-    pub fn load(files: &ModelFiles, quantize: Option<Quantize>) -> Result<Self> {
+    /// Loads the tokenizer and the given `parts`: the text encoder, and the
+    /// transformer and VAE, with the text encoder and transformer quantized
+    /// if `quantize` is set.
+    pub fn load(files: &ModelFiles, quantize: Option<Quantize>, parts: Parts) -> Result<Self> {
         let dtype = Dtype::Bfloat16;
 
         let tokenizer =
             Tokenizer::from_file(files.get("tokenizer/tokenizer.json")?).map_err(E::msg)?;
-        let te_files = (1..=3)
-            .map(|i| files.get(&format!("text_encoder/model-{i:05}-of-00003.safetensors")))
-            .collect::<Result<Vec<_>>>()?;
-        let text_encoder = TextEncoder::load(&te_files, dtype, quantize)?;
-        let tr_files = (1..=3)
-            .map(|i| {
-                files.get(&format!(
-                    "transformer/diffusion_pytorch_model-{i:05}-of-00003.safetensors"
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let transformer = Transformer::load(&tr_files, dtype, quantize)?;
-        let vae = Vae::load(files.get("vae/diffusion_pytorch_model.safetensors")?, dtype)?;
+        let text_encoder = if parts.encoders() {
+            let te_files = (1..=3)
+                .map(|i| files.get(&format!("text_encoder/model-{i:05}-of-00003.safetensors")))
+                .collect::<Result<Vec<_>>>()?;
+            Some(TextEncoder::load(&te_files, dtype, quantize)?)
+        } else {
+            None
+        };
+        let (transformer, vae) = if parts.generator() {
+            let tr_files = (1..=3)
+                .map(|i| {
+                    files.get(&format!(
+                        "transformer/diffusion_pytorch_model-{i:05}-of-00003.safetensors"
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let transformer = Transformer::load(&tr_files, dtype, quantize)?;
+            let vae = Vae::load(files.get("vae/diffusion_pytorch_model.safetensors")?, dtype)?;
+            (Some(transformer), Some(vae))
+        } else {
+            (None, None)
+        };
         // Drop the buffers left over from converting f32 weights to bf16.
         mlx_rs::memory::clear_cache()?;
 
@@ -63,22 +91,51 @@ impl ZImagePipeline {
         opts: &GenerateOptions,
         on_progress: &mut dyn FnMut(Progress),
     ) -> Result<Generated> {
-        let dtype = self.dtype;
+        let encoded = self.encode(opts)?;
+        self.generate_encoded(opts, &encoded, on_progress)
+    }
 
+    /// The prompt's caption features, and with guidance the negative
+    /// prompt's. Needs the text encoder.
+    pub fn encode(&self, opts: &GenerateOptions) -> Result<Encoded> {
         let started = Instant::now();
-        let cap_feats = self.encode_prompt(&opts.prompt, on_progress)?;
+        let (cap, tokens) = self.encode_prompt(&opts.prompt)?;
         // Like diffusers, guidance runs whenever the scale is positive, against
         // the negative prompt or, without one, the empty prompt.
-        let neg_cap_feats = if opts.guidance_scale > 0.0 {
-            Some(self.encode_prompt(&opts.negative_prompt, &mut |_| {})?)
+        let neg = if opts.guidance_scale > 0.0 {
+            Some(self.encode_prompt(&opts.negative_prompt)?.0)
         } else {
             None
         };
+        Ok(Encoded {
+            cap,
+            neg,
+            tokens,
+            took: started.elapsed(),
+        })
+    }
 
+    /// Generates from [`encode`](Self::encode)'s output for the same
+    /// options. Needs the transformer and VAE.
+    pub fn generate_encoded(
+        &self,
+        opts: &GenerateOptions,
+        encoded: &Encoded,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> Result<Generated> {
+        let dtype = self.dtype;
+        let (transformer, vae) = match (&self.transformer, &self.vae) {
+            (Some(t), Some(v)) => (t, v),
+            _ => anyhow::bail!("this pipeline was loaded without its transformer and VAE"),
+        };
+        on_progress(Progress::Encoded {
+            tokens: encoded.tokens,
+        });
+
+        let started = Instant::now();
         // latent = 2 * (image_size // 16): divisible by the patch size, and 8x VAE upsampling.
         let shape = [1, 16, 2 * (opts.height / 16), 2 * (opts.width / 16)];
         let noise = Array::from_slice(&seeded_noise(opts.seed, shape), &shape.map(|d| d as i32));
-        let encoded = Instant::now();
 
         // Like diffusers, the latents stay in f32 and the model reads bf16.
         let mut scheduler = Scheduler::new(opts.num_steps);
@@ -86,7 +143,7 @@ impl ZImagePipeline {
             None => (noise, opts.num_steps),
             Some(img) => {
                 let steps = scheduler.skip_for_strength(opts.strength);
-                let init = self.encode_image(img, opts.width, opts.height)?;
+                let init = self.encode_image(vae, img, opts.width, opts.height)?;
                 // Flow matching: x_sigma = sigma * noise + (1 - sigma) * x_0.
                 // At strength 1, sigma is exactly 1 and this is plain noise.
                 let sigma = scheduler.current_sigma();
@@ -102,15 +159,11 @@ impl ZImagePipeline {
         for step in 0..steps {
             let t = scheduler.current_timestep_normalized();
             let x = latents.as_dtype(dtype)?;
-            let mut pred = self
-                .transformer
-                .forward(&x, t, &cap_feats)?
+            let mut pred = transformer
+                .forward(&x, t, &encoded.cap)?
                 .as_dtype(Dtype::Float32)?;
-            if let Some(neg) = &neg_cap_feats {
-                let neg_pred = self
-                    .transformer
-                    .forward(&x, t, neg)?
-                    .as_dtype(Dtype::Float32)?;
+            if let Some(neg) = &encoded.neg {
+                let neg_pred = transformer.forward(&x, t, neg)?.as_dtype(Dtype::Float32)?;
                 pred = guide(&pred, &neg_pred, opts.guidance_scale as f32)?;
             }
             // Z-Image predicts the negated velocity; Euler step: x + dt * v.
@@ -127,9 +180,7 @@ impl ZImagePipeline {
 
         let denoised = Instant::now();
         on_progress(Progress::Decoding);
-        let image = self
-            .vae
-            .decode(&latents.as_dtype(dtype)?.transpose_axes(&[0, 2, 3, 1])?)?;
+        let image = vae.decode(&latents.as_dtype(dtype)?.transpose_axes(&[0, 2, 3, 1])?)?;
         // [-1, 1] -> [0, 255], computed in the model dtype like candle.
         let image = mlx_rs::ops::clip(&image, (-1.0f32, 1.0f32))?
             .add(scalar(1.0, dtype)?)?
@@ -140,8 +191,8 @@ impl ZImagePipeline {
         Ok(Generated {
             image: image.into(),
             timings: Timings {
-                text: encoded - started,
-                init_image: image_encoded - encoded,
+                text: encoded.took,
+                init_image: image_encoded - started,
                 denoise: denoised - image_encoded,
                 vae: denoised.elapsed(),
             },
@@ -149,7 +200,13 @@ impl ZImagePipeline {
     }
 
     /// RGB image -> (1, 16, H/8, W/8) latents, resized to `width` x `height`.
-    fn encode_image(&self, img: &image::RgbImage, width: usize, height: usize) -> Result<Array> {
+    fn encode_image(
+        &self,
+        vae: &Vae,
+        img: &image::RgbImage,
+        width: usize,
+        height: usize,
+    ) -> Result<Array> {
         let (w, h) = (width as u32, height as u32);
         let img = resize_to_fill(img, w, h);
         // [0, 255] -> [-1, 1], NHWC.
@@ -159,12 +216,17 @@ impl ZImagePipeline {
             .map(|&p| p as f32 / 127.5 - 1.0)
             .collect();
         let x = Array::from_slice(&pixels, &[1, h as i32, w as i32, 3]).as_dtype(self.dtype)?;
-        let z = self.vae.encode(&x)?.transpose_axes(&[0, 3, 1, 2])?;
+        let z = vae.encode(&x)?.transpose_axes(&[0, 3, 1, 2])?;
         z.eval()?;
         Ok(z)
     }
 
-    fn encode_prompt(&self, prompt: &str, on_progress: &mut dyn FnMut(Progress)) -> Result<Array> {
+    /// Caption features (1, tokens, 2560) and the token count.
+    fn encode_prompt(&self, prompt: &str) -> Result<(Array, usize)> {
+        let text_encoder = self
+            .text_encoder
+            .as_ref()
+            .context("this pipeline was loaded without its text encoder")?;
         let tokens = self
             .tokenizer
             .encode(format_prompt_for_qwen3(prompt).as_str(), true)
@@ -174,12 +236,9 @@ impl ZImagePipeline {
             .copied()
             .take(MAX_PROMPT_TOKENS)
             .collect::<Vec<_>>();
-        on_progress(Progress::Encoded {
-            tokens: tokens.len(),
-        });
-        let feats = self.text_encoder.forward(&tokens)?;
+        let feats = text_encoder.forward(&tokens)?;
         feats.eval()?;
-        Ok(feats)
+        Ok((feats, tokens.len()))
     }
 }
 

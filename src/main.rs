@@ -11,7 +11,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use image::ImageDecoder;
-use mixel::{GenerateOptions, LoadOptions, Model, Pipeline, Progress, Quantize};
+use mixel::{Encoded, GenerateOptions, LoadOptions, Model, Parts, Pipeline, Progress, Quantize};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -59,6 +59,11 @@ impl QuantizeArg {
         }
     }
 }
+
+/// How much memory the encoded prompts (and Qwen's resized reference images)
+/// may take before the batch generates them: ~0.3 MB per Z-Image-Turbo prompt,
+/// ~10 MB per Qwen-Image-2.1 edit. Beyond it, the encoders load again.
+const ENCODED_BUDGET: usize = 512 << 20;
 
 /// Shown after the options by `mixel --help` (not `-h`): a usage guide for
 /// scripts and AI agents.
@@ -133,14 +138,17 @@ Running it:
   - qwen-image-2.1-fast always runs 4 steps without guidance: --num-steps
     other than 4, or --guidance-scale above 1 with a negative prompt, is
     rejected.
-  - Needs Apple Silicon and memory: at 1024x1024, ~21 GB peak for
-    z-image-turbo and ~33-34 GB for the qwen models (GB = 2^30 bytes). Run
+  - Needs Apple Silicon and memory: at 1024x1024, ~14 GB peak for
+    z-image-turbo and ~17-18 GB for the qwen models (GB = 2^30 bytes). Run
     one mixel at a time.
-  - Less memory: --quantize 8 (~12.5 GB z-image-turbo, ~21-22 GB qwen) gives
-    practically the same images; --quantize 4 (~8 GB, ~14-16 GB) gives
+  - Less memory: --quantize 8 (~8 GB z-image-turbo, ~11-12 GB qwen) gives
+    practically the same images; --quantize 4 (~5.4 GB, ~7.5-9 GB) gives
     images as good but not the same ones for a seed. Both are ~10-25%
-    slower per step. On a 16 GB Mac, z-image-turbo --quantize 4 should fit;
-    on 24 GB, either model with --quantize 4.
+    slower per step. On an 8 GB Mac, z-image-turbo --quantize 4 should fit;
+    on 16 GB, either model with --quantize 4 or 8.
+  - The text encoders run first for all images (a batch in chunks), then
+    are freed before the transformer loads, so the two phases print two
+    \"Loaded in\" lines.
   - Arguments and every batch line are validated before the model loads,
     so mistakes fail within a second.
   - Exit status 0 on success; non-zero on invalid input, a failed image,
@@ -752,58 +760,103 @@ fn run(args: Args) -> Result<()> {
         Some(q) => format!(", quantized to {} bits", q.quantize().bits()),
         None => String::new(),
     };
-    match &args.model_path {
-        Some(p) => println!("\nLoading model from {p}{quantized}..."),
-        None => println!("\nLoading model {}{quantized}...", model.repo()),
-    }
-    let load_start = std::time::Instant::now();
-    let pipeline = Pipeline::load(&LoadOptions {
-        model,
-        repo: None,
-        model_path: args.model_path.as_ref().map(PathBuf::from),
-        cpu: args.cpu,
-        quantize: args.quantize.map(QuantizeArg::quantize),
-    })?;
-    println!("Loaded in {:.1}s", load_start.elapsed().as_secs_f64());
+    let source = match &args.model_path {
+        Some(p) => format!("from {p}"),
+        None => model.repo().to_string(),
+    };
+    let load = |parts: Parts| {
+        Pipeline::load(&LoadOptions {
+            model,
+            repo: None,
+            model_path: args.model_path.as_ref().map(PathBuf::from),
+            cpu: args.cpu,
+            quantize: args.quantize.map(QuantizeArg::quantize),
+            parts,
+        })
+    };
+    let encoders = if model.supports_reference_images() {
+        "text and vision encoders"
+    } else {
+        "text encoder"
+    };
 
+    // The encoders and the transformer are never in memory together: encode
+    // the prompts (up to a memory budget), free the encoders, then generate.
     let mut failed = Vec::new();
-    for (i, job) in todo.iter().enumerate() {
-        println!("\n[{}/{}] {}", i + 1, todo.len(), job.output.display());
-        println!("Prompt: {}", job.prompt);
-        println!("Size: {}x{}", job.width, job.height);
-        println!("Steps: {}", job.num_steps);
-        println!("Guidance scale: {}", job.guidance_scale);
-        let kind = if job.random_seed { " (random)" } else { "" };
-        println!("Seed: {}{kind}", job.seed);
-        if let Some(init) = &job.init_image {
-            println!(
-                "Init image: {} (strength {}, {} of {} steps)",
-                init.display(),
-                job.strength,
-                job.steps_to_run(),
-                job.num_steps
-            );
-        }
-        for r in &job.reference_images {
-            println!("Reference image: {}", r.display());
-        }
+    let mut next = 0;
+    while next < todo.len() {
+        println!("\nLoading the {encoders} of {source}{quantized}...");
         let start = std::time::Instant::now();
-        let result = match job.output.parent() {
-            Some(parent) => std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display())),
-            None => Ok(()),
+        let encoder = load(Parts::Encoders)?;
+        println!("Loaded in {:.1}s", start.elapsed().as_secs_f64());
+        let start = std::time::Instant::now();
+        let first = next;
+        let mut encoded = Vec::new();
+        let mut bytes = 0;
+        while next < todo.len() && bytes < ENCODED_BUDGET {
+            let result = todo[next].options().and_then(|opts| encoder.encode(&opts));
+            if let Ok(e) = &result {
+                bytes += e.nbytes();
+            }
+            encoded.push(result);
+            next += 1;
         }
-        .and_then(|()| generate(&pipeline, job));
-        match result {
-            Ok(()) => println!(
-                "Done! Image saved to {} ({:.1}s)",
-                job.output.display(),
-                start.elapsed().as_secs_f64()
-            ),
-            Err(e) if !batch => return Err(e),
-            Err(e) => {
-                eprintln!("Line {} failed: {e:#}", job.line);
-                failed.push(job.line);
+        drop(encoder);
+        println!(
+            "Encoded {} prompt(s) in {:.1}s",
+            encoded.len(),
+            start.elapsed().as_secs_f64()
+        );
+
+        println!("\nLoading model {source}{quantized}...");
+        let start = std::time::Instant::now();
+        let pipeline = load(Parts::Generator)?;
+        println!("Loaded in {:.1}s", start.elapsed().as_secs_f64());
+
+        for (i, (job, encoded)) in todo[first..next].iter().zip(encoded).enumerate() {
+            println!(
+                "\n[{}/{}] {}",
+                first + i + 1,
+                todo.len(),
+                job.output.display()
+            );
+            println!("Prompt: {}", job.prompt);
+            println!("Size: {}x{}", job.width, job.height);
+            println!("Steps: {}", job.num_steps);
+            println!("Guidance scale: {}", job.guidance_scale);
+            let kind = if job.random_seed { " (random)" } else { "" };
+            println!("Seed: {}{kind}", job.seed);
+            if let Some(init) = &job.init_image {
+                println!(
+                    "Init image: {} (strength {}, {} of {} steps)",
+                    init.display(),
+                    job.strength,
+                    job.steps_to_run(),
+                    job.num_steps
+                );
+            }
+            for r in &job.reference_images {
+                println!("Reference image: {}", r.display());
+            }
+            let start = std::time::Instant::now();
+            let result = match job.output.parent() {
+                Some(parent) => std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display())),
+                None => Ok(()),
+            }
+            .and(encoded)
+            .and_then(|encoded| generate(&pipeline, job, &encoded));
+            match result {
+                Ok(()) => println!(
+                    "Done! Image saved to {} ({:.1}s)",
+                    job.output.display(),
+                    start.elapsed().as_secs_f64()
+                ),
+                Err(e) if !batch => return Err(e),
+                Err(e) => {
+                    eprintln!("Line {} failed: {e:#}", job.line);
+                    failed.push(job.line);
+                }
             }
         }
     }
@@ -823,8 +876,8 @@ fn run(args: Args) -> Result<()> {
 }
 
 /// Generates one job's image with progress output and saves it.
-fn generate(pipeline: &Pipeline, job: &Job) -> Result<()> {
-    let out = pipeline.generate_with(&job.options()?, |p| match p {
+fn generate(pipeline: &Pipeline, job: &Job, encoded: &Encoded) -> Result<()> {
+    let out = pipeline.generate_encoded_with(&job.options()?, encoded, |p| match p {
         Progress::Encoded { tokens } => {
             let cut = job.model == Model::ZImageTurbo
                 && tokens >= mixel::zimage::pipeline::MAX_PROMPT_TOKENS;
