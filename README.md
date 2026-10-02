@@ -8,11 +8,11 @@ them also in a 4-step variant:
 |---|---|---:|---:|---|
 | `z-image-turbo` (default) | [Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | 9 | ~59 s | text-to-image, img2img |
 | `qwen-image-2.1` | [Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1) | 40 | ~6 min | text-to-image, img2img, **editing with reference images** |
-| `qwen-image-2.1-fast` | Qwen-Image-2.1 + [4-step Fun-Acc LoRA](https://huggingface.co/alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs) | 4 (fixed) | ~37 s | the same, slightly softer fine detail |
+| `qwen-image-2.1-fast` | Qwen-Image-2.1 + [4-step Fun-Acc LoRA](https://huggingface.co/alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs) | 4 (fixed) | ~38 s | the same, slightly softer fine detail |
 
 Times are medians from the [reference benchmark](benchmarks/) on an M3 Max (30-core GPU,
 96 GB), with the weights already in memory; an edit with a ~1024×1024 reference image takes
-~7.5 min (40 steps) or ~64 s (4 steps). Memory figures count GB as Apple does (2^30 bytes).
+~8 min (40 steps) or ~58 s (4 steps). Memory figures count GB as Apple does (2^30 bytes).
 Both are ports: Z-Image of
 candle-transformers' `z_image` (`src/zimage/`), Qwen-Image-2.1 of the diffusers pipeline and
 transformers' Qwen3-VL (`src/qwen21/`). The CLI, JSONL batch mode and seeding match
@@ -33,6 +33,8 @@ mixel --model qwen-fast --ref-image fox.png --prompt "Turn the fox into a gray w
 - Width/height must be multiples of 16 (Z-Image) or 32 (Qwen-Image). `--model-path <dir>`
   uses local weights (the 4-step adapter still comes from the Hugging Face cache).
 - Each run prints a timing breakdown: text encoding, init image, denoising, VAE.
+- A 1024×1024 image needs ~21 GB of memory with Z-Image-Turbo and ~33 GB with Qwen-Image-2.1;
+  [`--quantize 8` or `4`](#less-memory-8--and-4-bit-weights) brings that down to 8–16 GB.
 - Please [benchmark your Mac](#benchmark-your-mac) and send us the report.
 
 ## For AI agents and scripts
@@ -44,7 +46,7 @@ timings, memory, and exit codes. Rules of thumb:
 - Always pass `--prompt`, `--seed` and `--output` (or `id`s in JSONL) so the output path is known up front.
 - Generate several images with one `--input` JSONL run; the model loads once.
 - Allow minutes per image (more on the first run, which downloads the weights) and run one
-  `mixel` at a time: it needs 27–65 GB of memory.
+  `mixel` at a time: it needs 20–34 GB of memory, or 8–16 GB with `--quantize 4`.
 
 ## Editing with reference images (Qwen-Image-2.1)
 
@@ -66,8 +68,8 @@ reference-image token.
 `--model qwen-image-2.1-fast` (or `qwen-fast`) adds Alibaba PAI's
 [Fun-Acc LoRA](https://huggingface.co/alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs), distilled
 with Parallel Decoding Distillation, to the same base weights: text-to-image, img2img and
-editing run in 4 steps instead of 40: a 1024×1024 image takes ~37 s instead of ~6 min, an
-edit ~64 s instead of ~7.5 min. A step costs about the same as the base model's, so the gain
+editing run in 4 steps instead of 40: a 1024×1024 image takes ~38 s instead of ~6 min, an
+edit ~58 s instead of ~8 min. A step costs about the same as the base model's, so the gain
 is the step count.
 
 - It always runs its fixed 4-step schedule (`1.0, 0.917, 0.786, 0.549, 0`), without guidance:
@@ -96,6 +98,46 @@ mixel --init-image photo.jpg --prompt "A gray wolf sitting in fresh snow" --stre
   and keeps pose and framing. Changing a photo's *style* (to watercolor) needs a start
   closer to pure noise; with 9 steps the finest option skips a whole step, so use more:
   `--num-steps 20 --strength 0.95` gives a watercolor with the original composition.
+
+## Less memory: 8- and 4-bit weights
+
+```bash
+mixel --quantize 8 --prompt "A cute robot holding a candle" --seed 42
+mixel --quantize 4 --model qwen-fast --ref-image fox.png --prompt "Turn the fox into a gray wolf"
+```
+
+`--quantize 8` or `--quantize 4` stores the large layers of the text encoder and the
+transformer (their attention and MLP projections) in 8 or 4 bits as they load, with MLX's
+affine quantization (a scale and bias per 64 weights). The embeddings, norms, modulation
+layers and the VAE stay in bf16, Qwen's vision encoder in f32. The files on disk don't
+change. Peak memory, measured as the process footprint on the M3 Max:
+
+| | bf16 | `--quantize 8` | `--quantize 4` |
+|---|---:|---:|---:|
+| Z-Image-Turbo, 512×512 | 19.9 GB | 11.5 GB | **7.2 GB** |
+| Z-Image-Turbo, 1024×1024 | 20.8 GB | 12.5 GB | **8.1 GB** |
+| Qwen-Image-2.1 (40 or 4 steps), 1024×1024 | 33.0 GB | 20.7 GB | **14.6 GB** |
+| Qwen-Image-2.1, edit with a ~1024×1024 image | 34.1 GB | 21.8 GB | **15.5 GB** |
+
+- **8 bits gives practically the same images.** Each stage stays within 1–2% of bf16, about
+  the noise between two bf16 implementations (Z-Image: text encoder 0.6–1.1%, one
+  transformer step 1.7–1.9%).
+- **4 bits gives images as good, but not the same ones**: a seed no longer reproduces the
+  bf16 image. A Z-Image transformer step is ~16% off bf16 (the text encoder ~5%), enough to
+  change pose, layout and fine detail. No single kind of layer is to blame, and groups of
+  32 weights instead of 64 only bring it to 15%.
+- **Both are slower per step**, as MLX's quantized matmuls unpack the weights as they go: in
+  the [reference benchmark](benchmarks/), a 1024×1024 Z-Image-Turbo step takes 7.7 s at 8
+  bits and 7.9 s at 4 against 6.3 s in bf16, and a 4-step Qwen-Image-2.1 step 10.3 s at 4
+  bits against 8.7 s (an edit 11.7 against 10.5). Loading takes ~2 s longer.
+- `cargo run --release --example quantize_parity -- <model>` compares the stages and whole
+  images against bf16; `cargo run --release --example memory -- <model> <size> <bf16|8|4>`
+  shows the memory in each phase.
+
+Without `--quantize`, mixel also uses less than it did: the VAE decodes in bands of rows
+(MLX's convolutions allocate a workspace several times their input, ~4.5 GB for one 3×3
+convolution at 1024×1024), and MLX's buffer cache is off. A 1024×1024 Z-Image-Turbo image
+peaked at 36 GB before, and a Qwen-Image-2.1 edit at 65 GB; decoding takes ~1 s longer.
 
 ## As a library
 
@@ -158,18 +200,21 @@ We're collecting mixel timings across Macs. If you can spare the time, run:
 
 ```bash
 scripts/benchmark.sh --dry-run   # what would run, and download, on this Mac
-scripts/benchmark.sh             # run it: ~50 min on an M3 Max
+scripts/benchmark.sh             # run it: ~65 min on an M3 Max
 ```
 
-It runs each test that fits in your Mac's memory: Z-Image-Turbo at 512×512 and 1024×1024,
-and Qwen-Image-2.1 in 4 and 40 steps, text-to-image and an edit. It asks before downloading
-weights. The result is one file, `mixel-benchmark-<chip>-<gpu>-<memory>-<date>.md`, labelled
-with your Mac, chip, CPU and GPU cores, memory, macOS version and power source, with a table
-to read and a JSON block for us to compile.
+It runs each test that fits in your Mac's memory: Z-Image-Turbo at 512×512 and 1024×1024
+(also in 8 and 4 bits), and Qwen-Image-2.1 in 4 and 40 steps, text-to-image and an edit (the
+4-step ones also in 4 bits). The quantized tests fit from 16 GB (Z-Image-Turbo) or 24 GB
+(Qwen-Image-2.1), so smaller Macs can take part too. It asks before downloading weights.
+The result is one file, `mixel-benchmark-<chip>-<gpu>-<memory>-<date>.md`, labelled with
+your Mac, chip, CPU and GPU cores, memory, macOS version and power source, with a table to
+read and a JSON block for us to compile.
 
 **Please email it to [mixelate@proton.me](mailto:mixelate@proton.me).** It holds only the
 hardware summary and the timings: no serial numbers, hostnames, user names or images. For
-steadier numbers, plug in, close other apps and leave the Mac alone while it runs.
+steadier numbers, plug in, close other apps and leave the Mac alone while it runs, with the
+lid open: the script keeps it from sleeping, but closing the lid still does.
 [`benchmarks/`](benchmarks/) has the reference report from an M3 Max.
 
 ## mixel vs candy
@@ -179,11 +224,11 @@ original comparison; mixel's is from the [reference benchmark](benchmarks/):
 
 | | candy (candle 0.11) | mixel (mlx-rs 0.32) |
 |---|---:|---:|
-| 512×512 image | 22.2 s | **13.2 s** |
+| 512×512 image | 22.2 s | **13.6 s** |
 | 1024×1024 image | ~127 s | **59 s** |
-| 1024×1024: denoising | ~10.3 s/step | **6.4 s/step** |
-| 1024×1024: VAE decode | ~35 s | **1.4 s** |
-| Peak memory, 1024×1024 | 81 GB | **36 GB** |
+| 1024×1024: denoising | ~10.3 s/step | **6.3 s/step** |
+| 1024×1024: VAE decode | ~35 s | **2.4 s** |
+| Peak memory, 1024×1024 | 81 GB | **21 GB** (8 GB with `--quantize 4`) |
 
 candy's phase split is measured from its log timestamps (candle queues GPU work
 asynchronously, so treat it as approximate). The VAE gap matches MLX's much faster 3×3
@@ -238,11 +283,11 @@ returns zeros at 256 px and up (an 8-D reshape/permute), so diffusers' Qwen-Imag
 image encoding, and with it editing, is wrong on Apple GPUs. mixel isn't affected; the
 reference script works around it by running that module on the CPU.
 
-**Speed.** 1024×1024, 40 steps: 9.3 s/step (373 s per image, 52 GB peak) against 11.9
+**Speed.** 1024×1024, 40 steps: 9.1 s/step (366 s per image, 33 GB peak) against 11.9
 s/step for diffusers on the same M3 Max (measured in an earlier comparison). An edit with one
-~1024×1024 reference image: 10.7 s/step (445 s, 64 GB peak). These are medians of 3 runs back
-to back; the GPU slows as it heats under sustained load, so later runs take longer (349–375 s
-for the 40-step image). The
+~1024×1024 reference image: 11.7 s/step (484 s, 34 GB peak). These are medians of 3 runs back
+to back; the GPU slows as it heats under sustained load, so later runs take longer (450–489 s
+for the edit, the benchmark's last test, after an hour of load). The
 text and reference-image tokens are computed once per image and cached (as in the
 reference), so each step only runs the target tokens.
 

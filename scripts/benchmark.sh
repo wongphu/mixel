@@ -35,16 +35,16 @@ GIB=1073741824
 # id | label | model | extra args | steps | runs | peak GB | reference s | reference s/step
 # Peak memory and reference times are from $REF_HW.
 TESTS=(
-  "z512|Z-Image-Turbo, 512x512|z-image-turbo|--width 512 --height 512|9|3|19.7|13.2|1.4"
-  "z1024|Z-Image-Turbo, 1024x1024|z-image-turbo||9|3|20.8|59.0|6.4"
-  "z1024q8|Z-Image-Turbo 8-bit, 1024x1024|z-image-turbo|--quantize 8|9|3|12.5|70.0|7.6"
-  "z1024q4|Z-Image-Turbo 4-bit, 1024x1024|z-image-turbo|--quantize 4|9|3|8.1|70.0|7.6"
-  "fast|Qwen-Image-2.1 fast, 1024x1024|qwen-image-2.1-fast||4|3|32.9|36.8|8.7"
-  "fastq4|Qwen-Image-2.1 fast 4-bit, 1024x1024|qwen-image-2.1-fast|--quantize 4|4|3|14.2|42.0|10.0"
-  "fastedit|Qwen-Image-2.1 fast, edit|qwen-image-2.1-fast|--ref-image REF|4|3|34.0|63.6|11.6"
-  "fasteditq4|Qwen-Image-2.1 fast 4-bit, edit|qwen-image-2.1-fast|--ref-image REF --quantize 4|4|3|15.5|70.0|13.0"
-  "qwen|Qwen-Image-2.1, 1024x1024|qwen-image-2.1||40|3|32.6|373.0|9.3"
-  "qwenedit|Qwen-Image-2.1, edit|qwen-image-2.1|--ref-image REF|40|3|34.0|444.5|10.7"
+  "z512|Z-Image-Turbo, 512x512|z-image-turbo|--width 512 --height 512|9|3|19.9|13.6|1.4"
+  "z1024|Z-Image-Turbo, 1024x1024|z-image-turbo||9|3|20.8|59.3|6.3"
+  "z1024q8|Z-Image-Turbo 8-bit, 1024x1024|z-image-turbo|--quantize 8|9|3|12.5|71.6|7.7"
+  "z1024q4|Z-Image-Turbo 4-bit, 1024x1024|z-image-turbo|--quantize 4|9|3|8.1|73.5|7.9"
+  "fast|Qwen-Image-2.1 fast, 1024x1024|qwen-image-2.1-fast||4|3|33.0|37.8|8.7"
+  "fastq4|Qwen-Image-2.1 fast 4-bit, 1024x1024|qwen-image-2.1-fast|--quantize 4|4|3|14.6|43.8|10.3"
+  "fastedit|Qwen-Image-2.1 fast, edit|qwen-image-2.1-fast|--ref-image REF|4|3|34.1|57.8|10.5"
+  "fasteditq4|Qwen-Image-2.1 fast 4-bit, edit|qwen-image-2.1-fast|--ref-image REF --quantize 4|4|3|15.5|64.6|11.7"
+  "qwen|Qwen-Image-2.1, 1024x1024|qwen-image-2.1||40|3|32.9|365.6|9.1"
+  "qwenedit|Qwen-Image-2.1, edit|qwen-image-2.1|--ref-image REF|40|3|34.0|484.1|11.7"
 )
 # Models (Hugging Face repo, download GB) in the order the tests use them.
 repo_of() {

@@ -68,11 +68,11 @@ USAGE GUIDE (for scripts and AI agents)
 Choosing a model:
   z-image-turbo (default)  ~59 s for 1024x1024 on an M3 Max (30-core GPU).
                            Use for text-to-image and img2img.
-  qwen-image-2.1-fast      ~37 s for 1024x1024, ~64 s for an edit (4 steps).
+  qwen-image-2.1-fast      ~38 s for 1024x1024, ~58 s for an edit (4 steps).
   (alias qwen-fast)        Use to edit existing images (--ref-image). Fine
                            detail and small text are a little softer than
                            with qwen-image-2.1.
-  qwen-image-2.1           ~6 min for 1024x1024, ~7.5 min for an edit (40
+  qwen-image-2.1           ~6 min for 1024x1024, ~8 min for an edit (40
                            steps). Use when the fast variant's detail is
                            not enough.
   Both Qwen variants' weights are for research, not commercial use.
@@ -112,7 +112,7 @@ Where the image goes:
 
 Sizes: width and height must be multiples of 16 (z-image-turbo) or 32
 (qwen models); default 1024x1024, or follows --init-image / --ref-image.
-Smaller is faster: 512x512 takes ~13 s with z-image-turbo.
+Smaller is faster: 512x512 takes ~14 s with z-image-turbo.
 
 Prompts: z-image-turbo reads at most 512 tokens (a few hundred words) and
 ignores the rest; the \"Token count\" line says when a prompt was cut.
@@ -124,8 +124,8 @@ empty prompt without one); a negative prompt alone is rejected.
 qwen-image-2.1 turns it on above 1 and needs a negative prompt.
 
 Running it:
-  - Per 1024x1024 image: ~1 min (z-image-turbo), ~37-64 s
-    (qwen-image-2.1-fast) or 6-7.5 min (qwen-image-2.1), plus a few seconds
+  - Per 1024x1024 image: ~1 min (z-image-turbo), ~38-58 s
+    (qwen-image-2.1-fast) or 6-8 min (qwen-image-2.1), plus a few seconds
     of model loading once the weights are cached. The first run downloads
     ~33 GB (z-image-turbo) or ~31 GB (qwen models; the fast variant adds
     0.35 GB) to ~/.cache/huggingface. Use long timeouts or run it in the
@@ -138,7 +138,7 @@ Running it:
     one mixel at a time.
   - Less memory: --quantize 8 (~12.5 GB z-image-turbo, ~21-22 GB qwen) gives
     practically the same images; --quantize 4 (~8 GB, ~14-16 GB) gives
-    images as good but not the same ones for a seed. Both are ~5-15%
+    images as good but not the same ones for a seed. Both are ~10-25%
     slower per step. On a 16 GB Mac, z-image-turbo --quantize 4 should fit;
     on 24 GB, either model with --quantize 4.
   - Arguments and every batch line are validated before the model loads,
