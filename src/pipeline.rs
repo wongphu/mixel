@@ -1,6 +1,6 @@
 //! The end-to-end text-to-image pipeline.
 
-use crate::nn::ModelFiles;
+use crate::nn::{ModelFiles, Quantize};
 use crate::qwen21::pipeline::QwenPipeline;
 use crate::zimage::pipeline::ZImagePipeline;
 use anyhow::Result;
@@ -116,6 +116,9 @@ pub struct LoadOptions {
     pub model_path: Option<PathBuf>,
     /// Run on the CPU instead of the GPU.
     pub cpu: bool,
+    /// Quantize the text encoder and transformer as they load, to use less
+    /// memory (see [`Quantize`]).
+    pub quantize: Option<Quantize>,
 }
 
 /// What to generate.
@@ -355,18 +358,32 @@ enum Inner {
 
 impl Pipeline {
     /// Loads the model's weights (downloading them on first use).
+    ///
+    /// This turns off MLX's buffer cache for the process
+    /// (`mlx_rs::memory::set_cache_limit(0)`): MLX otherwise keeps freed
+    /// buffers for reuse, which added up to 10 GiB to the peak (most of it
+    /// while decoding) for no measurable speedup.
     pub fn load(opts: &LoadOptions) -> Result<Self> {
         if opts.cpu {
             mlx_rs::Device::set_default(&mlx_rs::Device::cpu());
         }
+        mlx_rs::memory::set_cache_limit(0)?;
         let repo = opts.repo.as_deref().unwrap_or(opts.model.repo());
         let files = ModelFiles::new(repo, opts.model_path.as_deref())?;
         let inner = match opts.model {
-            Model::ZImageTurbo => Inner::ZImage(Box::new(ZImagePipeline::load(&files)?)),
-            Model::QwenImage21 => Inner::Qwen(Box::new(QwenPipeline::load(&files, None)?)),
+            Model::ZImageTurbo => {
+                Inner::ZImage(Box::new(ZImagePipeline::load(&files, opts.quantize)?))
+            }
+            Model::QwenImage21 => {
+                Inner::Qwen(Box::new(QwenPipeline::load(&files, None, opts.quantize)?))
+            }
             Model::QwenImage21Fast => {
                 let adapter = ModelFiles::new(crate::qwen21::fast::REPO, None)?;
-                Inner::Qwen(Box::new(QwenPipeline::load(&files, Some(&adapter))?))
+                Inner::Qwen(Box::new(QwenPipeline::load(
+                    &files,
+                    Some(&adapter),
+                    opts.quantize,
+                )?))
             }
         };
         Ok(Self {

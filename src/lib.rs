@@ -19,6 +19,7 @@ mod pipeline;
 pub mod qwen21;
 pub mod zimage;
 
+pub use nn::Quantize;
 pub use pipeline::{
     composite_over_white, seeded_noise, GenerateOptions, Generated, LoadOptions, Model, Pipeline,
     Progress, Timings, DEFAULT_REPO, DEFAULT_STEPS, SIZE_ALIGN,

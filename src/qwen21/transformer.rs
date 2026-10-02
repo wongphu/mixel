@@ -10,7 +10,7 @@
 //! target image's tokens per step (the reference pipeline's KV cache).
 
 use super::fast::Adapter;
-use crate::nn::{gelu_tanh, layer_norm, linear, rms_norm, silu, split_seq, Weights};
+use crate::nn::{gelu_tanh, layer_norm, linear, rms_norm, silu, split_seq, Quantize, Weights};
 use anyhow::{Context, Result};
 use mlx_rs::fast::{scaled_dot_product_attention, ScaledDotProductAttentionMask};
 use mlx_rs::ops::{concatenate, split_at_indices, tanh};
@@ -54,9 +54,20 @@ pub struct Transformer {
 }
 
 impl Transformer {
-    pub fn load(files: &[impl AsRef<Path>], dtype: Dtype) -> Result<Self> {
+    /// With `quantize`, the attention and MLP layers of every block are
+    /// quantized. The input, time and modulation layers and `proj_out` stay
+    /// unquantized.
+    pub fn load(
+        files: &[impl AsRef<Path>],
+        dtype: Dtype,
+        quantize: Option<Quantize>,
+    ) -> Result<Self> {
+        let blocks = |layer: &str| {
+            layer.starts_with("transformer_blocks.")
+                && (layer.contains(".attn.") || layer.contains(".img_mlp."))
+        };
         Ok(Self {
-            w: Weights::load(files, dtype, |_| true)?,
+            w: Weights::load_quantized(files, dtype, |_| true, quantize, blocks)?,
             dtype,
             heads: Vec::new(),
         })
@@ -72,7 +83,7 @@ impl Transformer {
         for name in &adapter.full {
             self.w.replace(name, adapter.full(name)?.clone())?;
         }
-        let proj = self.w.get("proj_out.weight")?.shape().to_vec();
+        let proj = self.w.shape("proj_out.weight")?;
         for head in &adapter.heads {
             anyhow::ensure!(
                 head.shape() == proj,

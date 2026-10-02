@@ -180,6 +180,7 @@ fn main() -> Result<()> {
             .map(|i| files.get(&format!("text_encoder/model-{i:05}-of-00004.safetensors")))
             .collect::<Result<Vec<_>>>()?,
         bf16,
+        None,
     )?;
     let h = te.forward(&p_t2i.ids, &p_t2i.positions, &[])?;
     report(
@@ -244,6 +245,7 @@ fn main() -> Result<()> {
             })
             .collect::<Result<Vec<_>>>()?,
         bf16,
+        None,
     )?;
     let t0 = vec(&t2i["tr_timestep"])?[0];
     let segs = segments_from_mask(&t2i["tr_img_mask"], 256, &[])?;

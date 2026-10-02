@@ -2,8 +2,10 @@
 //! `z_image::vae`. Runs in NHWC, MLX's native convolution layout.
 
 use super::{linear, scalar, silu, Weights};
+use crate::nn::conv_in_bands;
 use anyhow::Result;
 use mlx_rs::fast::scaled_dot_product_attention;
+use mlx_rs::ops::indexing::IndexOp;
 use mlx_rs::ops::{broadcast_to, conv2d, pad, split_at_indices};
 use mlx_rs::{Array, Dtype};
 use std::path::Path;
@@ -16,6 +18,8 @@ const NUM_BLOCKS: usize = 4;
 const RESNETS_PER_DOWN_BLOCK: usize = 2;
 const RESNETS_PER_UP_BLOCK: usize = 3;
 const LATENT_CHANNELS: i32 = 16;
+/// Bytes of f32 per band when summing GroupNorm statistics.
+const STATS_BAND_BYTES: usize = 128 << 20;
 
 pub struct Vae {
     w: Weights,
@@ -59,8 +63,7 @@ impl Vae {
         h = self.resnet("encoder.mid_block.resnets.0", &h)?;
         h = self.attention("encoder.mid_block.attentions.0", &h)?;
         h = self.resnet("encoder.mid_block.resnets.1", &h)?;
-        let h = silu(&self.group_norm(&h, "encoder.conv_norm_out")?)?;
-        self.conv(&h, "encoder.conv_out", 1)
+        self.norm_silu_conv(&h, "encoder.conv_norm_out", "encoder.conv_out")
     }
 
     /// Latents (B, H, W, 16) -> image (B, 8H, 8W, 3) in [-1, 1].
@@ -81,8 +84,7 @@ impl Vae {
                 h = self.conv(&upsample_nearest_2x(&h)?, &up, 1)?;
             }
         }
-        let h = silu(&self.group_norm(&h, "decoder.conv_norm_out")?)?;
-        self.conv(&h, "decoder.conv_out", 1)
+        self.norm_silu_conv(&h, "decoder.conv_norm_out", "decoder.conv_out")
     }
 
     fn conv(&self, x: &Array, p: &str, padding: i32) -> Result<Array> {
@@ -90,41 +92,50 @@ impl Vae {
     }
 
     fn conv_strided(&self, x: &Array, p: &str, padding: i32, stride: i32) -> Result<Array> {
-        let y = conv2d(
+        let weight = self.w.get(&format!("{p}.weight"))?;
+        let bias = self.w.get(&format!("{p}.bias"))?;
+        if stride == 1 {
+            return conv_in_bands(x, weight, Some(bias), padding, |x| Ok(x.clone()));
+        }
+        let y = conv2d(x, weight, (stride, stride), (padding, padding), None, None)?;
+        Ok(y.add(bias)?)
+    }
+
+    /// `conv(silu(group_norm(x)))` with a 3x3 `conv`, in bands of rows (see
+    /// [`conv_in_bands`]): only the norm's statistics need all of `x`.
+    fn norm_silu_conv(&self, x: &Array, norm: &str, conv: &str) -> Result<Array> {
+        let (mean, rstd) = group_stats(x)?;
+        let (gamma, beta) = (
+            self.w.get(&format!("{norm}.weight"))?,
+            self.w.get(&format!("{norm}.bias"))?,
+        );
+        conv_in_bands(
             x,
-            self.w.get(&format!("{p}.weight"))?,
-            (stride, stride),
-            (padding, padding),
-            None,
-            None,
-        )?;
-        Ok(y.add(self.w.get(&format!("{p}.bias"))?)?)
+            self.w.get(&format!("{conv}.weight"))?,
+            Some(self.w.get(&format!("{conv}.bias"))?),
+            1,
+            |x| {
+                silu(
+                    &normalize(x, &mean, &rstd, self.dtype)?
+                        .multiply(gamma)?
+                        .add(beta)?,
+                )
+            },
+        )
     }
 
     /// GroupNorm over NHWC. Like candle, normalizes in f32, then applies the
     /// affine parameters in the model dtype.
     fn group_norm(&self, x: &Array, p: &str) -> Result<Array> {
-        let sh = x.shape().to_vec();
-        let (b, h, w, c) = (sh[0], sh[1], sh[2], sh[3]);
-        let g = x
-            .as_dtype(Dtype::Float32)?
-            .reshape(&[b, h * w, GROUPS, c / GROUPS])?;
-        let mean = g.mean_axes(&[1, 3], true)?;
-        let var = g.var_axes(&[1, 3], true, None)?;
-        let n = g
-            .subtract(&mean)?
-            .multiply(var.add(Array::from_f32(EPS))?.rsqrt()?)?
-            .reshape(&[b, h, w, c])?
-            .as_dtype(self.dtype)?;
-        Ok(n.multiply(self.w.get(&format!("{p}.weight"))?)?
+        let (mean, rstd) = group_stats(x)?;
+        Ok(normalize(x, &mean, &rstd, self.dtype)?
+            .multiply(self.w.get(&format!("{p}.weight"))?)?
             .add(self.w.get(&format!("{p}.bias"))?)?)
     }
 
     fn resnet(&self, p: &str, x: &Array) -> Result<Array> {
-        let h = silu(&self.group_norm(x, &format!("{p}.norm1"))?)?;
-        let h = self.conv(&h, &format!("{p}.conv1"), 1)?;
-        let h = silu(&self.group_norm(&h, &format!("{p}.norm2"))?)?;
-        let h = self.conv(&h, &format!("{p}.conv2"), 1)?;
+        let h = self.norm_silu_conv(x, &format!("{p}.norm1"), &format!("{p}.conv1"))?;
+        let h = self.norm_silu_conv(&h, &format!("{p}.norm2"), &format!("{p}.conv2"))?;
         let shortcut = format!("{p}.conv_shortcut");
         let x = if self.w.has(&format!("{shortcut}.weight")) {
             self.conv(x, &shortcut, 0)?
@@ -159,6 +170,47 @@ impl Vae {
         )?;
         Ok(o.reshape(&[b, h, w, c])?.add(x)?)
     }
+}
+
+/// GroupNorm statistics of NHWC `x`: per-group mean and 1/std in f32, each
+/// (B, 1, GROUPS, 1). Summed over bands of rows, so `x` is never all in f32.
+fn group_stats(x: &Array) -> Result<(Array, Array)> {
+    let (b, h, w, c) = (x.shape()[0], x.shape()[1], x.shape()[2], x.shape()[3]);
+    let rows = (STATS_BAND_BYTES / (w * c * 4).max(1) as usize).clamp(1, h as usize) as i32;
+    let groups = |r: i32| -> Result<Array> {
+        let n = rows.min(h - r);
+        Ok(x.index((.., r..r + n, .., ..))
+            .as_dtype(Dtype::Float32)?
+            .reshape(&[b, n * w, GROUPS, c / GROUPS])?)
+    };
+    let count = Array::from_f32((h * w * (c / GROUPS)) as f32);
+    let sum_bands = |f: &dyn Fn(Array) -> Result<Array>| -> Result<Array> {
+        let mut total: Option<Array> = None;
+        for r in (0..h).step_by(rows as usize) {
+            let s = f(groups(r)?)?.sum_axes(&[1, 3], true)?;
+            total = Some(match total {
+                Some(t) => t.add(s)?,
+                None => s,
+            });
+            total.as_ref().unwrap().eval()?;
+        }
+        Ok(total.expect("at least one row"))
+    };
+    let mean = sum_bands(&|g| Ok(g))?.divide(&count)?;
+    let var = sum_bands(&|g| Ok(g.subtract(&mean)?.square()?))?.divide(&count)?;
+    Ok((mean, var.add(Array::from_f32(EPS))?.rsqrt()?))
+}
+
+/// `(x - mean) * rstd` per group in f32, cast to `dtype`.
+fn normalize(x: &Array, mean: &Array, rstd: &Array, dtype: Dtype) -> Result<Array> {
+    let sh = x.shape().to_vec();
+    let (b, h, w, c) = (sh[0], sh[1], sh[2], sh[3]);
+    Ok(x.as_dtype(Dtype::Float32)?
+        .reshape(&[b, h * w, GROUPS, c / GROUPS])?
+        .subtract(mean)?
+        .multiply(rstd)?
+        .reshape(&[b, h, w, c])?
+        .as_dtype(dtype)?)
 }
 
 /// Nearest-neighbor 2x upsampling of NHWC.

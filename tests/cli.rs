@@ -97,6 +97,16 @@ fn conflicting_flags_are_rejected() {
 }
 
 #[test]
+fn quantize_takes_8_or_4_bits() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = mixel(&["--quantize", "3", "--prompt", "x"], dir.path());
+    assert!(!out.status.success());
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("invalid value '3'"), "{stderr}");
+    assert!(stderr.contains("[possible values: 8, 4]"), "{stderr}");
+}
+
+#[test]
 fn help_documents_batch_mode() {
     let out = mixel(&["--help"], Path::new("."));
     let stdout = text(&out.stdout);
@@ -106,6 +116,7 @@ fn help_documents_batch_mode() {
         "--output-dir",
         "--overwrite",
         "--seed",
+        "--quantize",
         "USAGE GUIDE",
     ] {
         assert!(stdout.contains(flag), "missing {flag}");
@@ -154,6 +165,39 @@ fn generates_reproducible_image() {
         image::image_dimensions(dir.path().join(&c)).unwrap(),
         (320, 192)
     );
+}
+
+#[test]
+#[ignore = "needs the ~33 GB Z-Image-Turbo weights and a GPU; run with --ignored"]
+fn quantized_model_generates_reproducible_images() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.png", "b.png"] {
+        let out = mixel(
+            &[
+                "--quantize",
+                "4",
+                "--prompt",
+                "a red apple",
+                "--seed",
+                "5",
+                "--width",
+                "256",
+                "--height",
+                "256",
+                "--num-steps",
+                "2",
+                "--output",
+                name,
+            ],
+            dir.path(),
+        );
+        let stdout = text(&out.stdout);
+        assert!(out.status.success(), "{stdout}\n{}", text(&out.stderr));
+        assert!(stdout.contains("quantized to 4 bits"), "{stdout}");
+    }
+    let a = std::fs::read(dir.path().join("a.png")).unwrap();
+    let b = std::fs::read(dir.path().join("b.png")).unwrap();
+    assert_eq!(a, b, "same seed and prompt should give identical images");
 }
 
 #[test]

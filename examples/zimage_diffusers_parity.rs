@@ -199,6 +199,7 @@ fn main() -> Result<()> {
                 .map(|i| files.get(&format!("text_encoder/model-{i:05}-of-00003.safetensors")))
                 .collect::<Result<Vec<_>>>()?,
             bf16,
+            None,
         )?;
         let feats = te.forward(&ids)?;
         feats.eval()?;
@@ -219,6 +220,7 @@ fn main() -> Result<()> {
             })
             .collect::<Result<Vec<_>>>()?,
         bf16,
+        None,
     )?;
     let x_plain = run("No guidance", &tr, &rec, noise, None)?;
     let x_cfg = run("Guidance 3", &tr, &cfg, noise, Some((&empty, 3.0)))?;

@@ -11,7 +11,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use image::ImageDecoder;
-use mixel::{GenerateOptions, LoadOptions, Model, Pipeline, Progress};
+use mixel::{GenerateOptions, LoadOptions, Model, Pipeline, Progress, Quantize};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -36,6 +36,26 @@ impl ModelArg {
             Self::ZImageTurbo => Model::ZImageTurbo,
             Self::QwenImage21 => Model::QwenImage21,
             Self::QwenImage21Fast => Model::QwenImage21Fast,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
+enum QuantizeArg {
+    /// 8 bits: about half the memory, practically the same images
+    #[value(name = "8")]
+    Q8,
+    /// 4 bits: about a third of the memory, as good images but not the
+    /// same ones for a given seed
+    #[value(name = "4")]
+    Q4,
+}
+
+impl QuantizeArg {
+    fn quantize(self) -> Quantize {
+        match self {
+            Self::Q8 => Quantize::Q8,
+            Self::Q4 => Quantize::Q4,
         }
     }
 }
@@ -113,9 +133,14 @@ Running it:
   - qwen-image-2.1-fast always runs 4 steps without guidance: --num-steps
     other than 4, or --guidance-scale above 1 with a negative prompt, is
     rejected.
-  - Needs Apple Silicon and lots of memory: ~36 GB peak for z-image-turbo
-    at 1024x1024, ~52-65 GB for the qwen models (GB = 2^30 bytes). Run one
-    mixel at a time.
+  - Needs Apple Silicon and memory: at 1024x1024, ~21 GB peak for
+    z-image-turbo and ~33-34 GB for the qwen models (GB = 2^30 bytes). Run
+    one mixel at a time.
+  - Less memory: --quantize 8 (~12.5 GB z-image-turbo, ~21-22 GB qwen) gives
+    practically the same images; --quantize 4 (~8 GB, ~14-16 GB) gives
+    images as good but not the same ones for a seed. Both are ~5-15%
+    slower per step. On a 16 GB Mac, z-image-turbo --quantize 4 should fit;
+    on 24 GB, either model with --quantize 4.
   - Arguments and every batch line are validated before the model loads,
     so mistakes fail within a second.
   - Exit status 0 on success; non-zero on invalid input, a failed image,
@@ -193,6 +218,11 @@ struct Args {
     /// Which model to use.
     #[arg(long, value_enum, default_value = "z-image-turbo")]
     model: ModelArg,
+
+    /// Quantize the model's large layers to 8 or 4 bits as it loads, to fit
+    /// in less memory.
+    #[arg(long, value_enum)]
+    quantize: Option<QuantizeArg>,
 
     /// Override path to the model weights directory (uses HuggingFace by default).
     #[arg(long)]
@@ -718,9 +748,13 @@ fn run(args: Args) -> Result<()> {
         );
     }
 
+    let quantized = match args.quantize {
+        Some(q) => format!(", quantized to {} bits", q.quantize().bits()),
+        None => String::new(),
+    };
     match &args.model_path {
-        Some(p) => println!("\nLoading model from {p}..."),
-        None => println!("\nLoading model {}...", model.repo()),
+        Some(p) => println!("\nLoading model from {p}{quantized}..."),
+        None => println!("\nLoading model {}{quantized}...", model.repo()),
     }
     let load_start = std::time::Instant::now();
     let pipeline = Pipeline::load(&LoadOptions {
@@ -728,6 +762,7 @@ fn run(args: Args) -> Result<()> {
         repo: None,
         model_path: args.model_path.as_ref().map(PathBuf::from),
         cpu: args.cpu,
+        quantize: args.quantize.map(QuantizeArg::quantize),
     })?;
     println!("Loaded in {:.1}s", load_start.elapsed().as_secs_f64());
 

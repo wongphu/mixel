@@ -8,7 +8,7 @@ use super::transformer::{Segment, Transformer, TOKENS_PER_SLOT};
 use super::vae::Vae;
 use super::vision::VisionEncoder;
 use super::{scheduler, OUTPUT_RESOLUTION, VAE_SCALE};
-use crate::nn::ModelFiles;
+use crate::nn::{ModelFiles, Quantize};
 use crate::pipeline::{
     composite_over_white, resize_to_fill, seeded_noise, GenerateOptions, Generated, Progress,
     Timings,
@@ -45,8 +45,13 @@ struct Reference {
 }
 
 impl QwenPipeline {
-    /// Loads the base model, with the 4-step adapter applied if given.
-    pub fn load(files: &ModelFiles, adapter: Option<&ModelFiles>) -> Result<Self> {
+    /// Loads the base model, with the 4-step adapter applied if given, and the
+    /// text encoder and transformer quantized if `quantize` is set.
+    pub fn load(
+        files: &ModelFiles,
+        adapter: Option<&ModelFiles>,
+        quantize: Option<Quantize>,
+    ) -> Result<Self> {
         let dtype = Dtype::Bfloat16;
         let tokenizer =
             Tokenizer::from_file(files.get("processor/tokenizer.json")?).map_err(E::msg)?;
@@ -58,7 +63,7 @@ impl QwenPipeline {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let text_encoder = TextEncoder::load(&te_files, dtype)?;
+        let text_encoder = TextEncoder::load(&te_files, dtype, quantize)?;
         // The vision encoder is small (0.4B) and runs in f32: in bf16 its output
         // drifts ~6% from f32, which the text encoder amplifies ~4x.
         let vision = VisionEncoder::load(&te_files, Dtype::Float32)?;
@@ -69,7 +74,7 @@ impl QwenPipeline {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut transformer = Transformer::load(&tr_files, dtype)?;
+        let mut transformer = Transformer::load(&tr_files, dtype, quantize)?;
         let fast_sigmas = match adapter {
             Some(files) => {
                 let adapter = Adapter::load(files, dtype)?;

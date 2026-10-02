@@ -2,7 +2,7 @@
 
 use super::{
     scalar, scheduler::Scheduler, text_encoder::TextEncoder, transformer::Transformer, vae::Vae,
-    ModelFiles,
+    ModelFiles, Quantize,
 };
 use crate::pipeline::{
     resize_to_fill, seeded_noise, to_rgb_image, GenerateOptions, Generated, Progress, Timings,
@@ -26,8 +26,9 @@ pub struct ZImagePipeline {
 }
 
 impl ZImagePipeline {
-    /// Loads the tokenizer, text encoder, transformer and VAE.
-    pub fn load(files: &ModelFiles) -> Result<Self> {
+    /// Loads the tokenizer, text encoder, transformer and VAE, with the text
+    /// encoder and transformer quantized if `quantize` is set.
+    pub fn load(files: &ModelFiles, quantize: Option<Quantize>) -> Result<Self> {
         let dtype = Dtype::Bfloat16;
 
         let tokenizer =
@@ -35,7 +36,7 @@ impl ZImagePipeline {
         let te_files = (1..=3)
             .map(|i| files.get(&format!("text_encoder/model-{i:05}-of-00003.safetensors")))
             .collect::<Result<Vec<_>>>()?;
-        let text_encoder = TextEncoder::load(&te_files, dtype)?;
+        let text_encoder = TextEncoder::load(&te_files, dtype, quantize)?;
         let tr_files = (1..=3)
             .map(|i| {
                 files.get(&format!(
@@ -43,7 +44,7 @@ impl ZImagePipeline {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let transformer = Transformer::load(&tr_files, dtype)?;
+        let transformer = Transformer::load(&tr_files, dtype, quantize)?;
         let vae = Vae::load(files.get("vae/diffusion_pytorch_model.safetensors")?, dtype)?;
         // Drop the buffers left over from converting f32 weights to bf16.
         mlx_rs::memory::clear_cache()?;

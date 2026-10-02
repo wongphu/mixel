@@ -1,7 +1,7 @@
 //! Z-Image DiT (ZImageTransformer2DModel), ported from candle's
 //! `z_image::transformer`.
 
-use super::{linear, rms_norm, scalar, silu, Weights};
+use super::{linear, rms_norm, scalar, silu, Quantize, Weights};
 use anyhow::Result;
 use mlx_rs::fast::scaled_dot_product_attention;
 use mlx_rs::ops::{concatenate, split_at_indices, tanh};
@@ -44,8 +44,21 @@ struct Rope {
 }
 
 impl Transformer {
-    pub fn load(files: &[impl AsRef<Path>], dtype: Dtype) -> Result<Self> {
-        let w = Weights::load(files, dtype, |_| true)?;
+    /// With `quantize`, the attention and feed-forward layers of every block
+    /// are quantized (~98% of the weights). The embedders, the adaLN
+    /// modulations and the final layer are small and stay unquantized.
+    pub fn load(
+        files: &[impl AsRef<Path>],
+        dtype: Dtype,
+        quantize: Option<Quantize>,
+    ) -> Result<Self> {
+        let w = Weights::load_quantized(
+            files,
+            dtype,
+            |_| true,
+            quantize,
+            |layer| layer.contains(".attention.") || layer.contains(".feed_forward."),
+        )?;
         let mut rope_cos = Vec::new();
         let mut rope_sin = Vec::new();
         for (&d, &len) in AXES_DIMS.iter().zip(&AXES_LENS) {

@@ -4,7 +4,7 @@
 //! Returns the last decoder layer's hidden states *before* the final RMSNorm,
 //! which is what the Qwen-Image-2.1 transformer was trained on.
 
-use crate::nn::{linear, rms_norm, rotate_half, silu, split_seq, Weights};
+use crate::nn::{linear, rms_norm, rotate_half, silu, split_seq, Quantize, Weights};
 use anyhow::Result;
 use mlx_rs::fast::{scaled_dot_product_attention, ScaledDotProductAttentionMask};
 use mlx_rs::ops::concatenate;
@@ -38,9 +38,21 @@ pub struct TextEncoder {
 }
 
 impl TextEncoder {
-    /// Loads the language model half of the Qwen3-VL checkpoint.
-    pub fn load(files: &[impl AsRef<Path>], dtype: Dtype) -> Result<Self> {
-        let w = Weights::load(files, dtype, |n| n.starts_with("model.language_model."))?;
+    /// Loads the language model half of the Qwen3-VL checkpoint. With
+    /// `quantize`, every attention and MLP projection is quantized (not the
+    /// token embeddings).
+    pub fn load(
+        files: &[impl AsRef<Path>],
+        dtype: Dtype,
+        quantize: Option<Quantize>,
+    ) -> Result<Self> {
+        let w = Weights::load_quantized(
+            files,
+            dtype,
+            |n| n.starts_with("model.language_model."),
+            quantize,
+            |layer| layer.starts_with("model.language_model.layers."),
+        )?;
         Ok(Self { w, dtype })
     }
 

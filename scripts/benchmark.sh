@@ -28,12 +28,16 @@ GIB=1073741824
 # id | label | model | extra args | steps | runs | peak GB | reference s | reference s/step
 # Peak memory and reference times are from $REF_HW.
 TESTS=(
-  "z512|Z-Image-Turbo, 512x512|z-image-turbo|--width 512 --height 512|9|3|26.7|13.2|1.4"
-  "z1024|Z-Image-Turbo, 1024x1024|z-image-turbo||9|3|36.4|59.0|6.4"
-  "fast|Qwen-Image-2.1 fast, 1024x1024|qwen-image-2.1-fast||4|3|52.1|36.8|8.7"
-  "fastedit|Qwen-Image-2.1 fast, edit|qwen-image-2.1-fast|--ref-image REF|4|3|64.8|63.6|11.6"
-  "qwen|Qwen-Image-2.1, 1024x1024|qwen-image-2.1||40|3|51.5|373.0|9.3"
-  "qwenedit|Qwen-Image-2.1, edit|qwen-image-2.1|--ref-image REF|40|3|64.2|444.5|10.7"
+  "z512|Z-Image-Turbo, 512x512|z-image-turbo|--width 512 --height 512|9|3|19.7|13.2|1.4"
+  "z1024|Z-Image-Turbo, 1024x1024|z-image-turbo||9|3|20.8|59.0|6.4"
+  "z1024q8|Z-Image-Turbo 8-bit, 1024x1024|z-image-turbo|--quantize 8|9|3|12.5|70.0|7.6"
+  "z1024q4|Z-Image-Turbo 4-bit, 1024x1024|z-image-turbo|--quantize 4|9|3|8.1|70.0|7.6"
+  "fast|Qwen-Image-2.1 fast, 1024x1024|qwen-image-2.1-fast||4|3|32.9|36.8|8.7"
+  "fastq4|Qwen-Image-2.1 fast 4-bit, 1024x1024|qwen-image-2.1-fast|--quantize 4|4|3|14.2|42.0|10.0"
+  "fastedit|Qwen-Image-2.1 fast, edit|qwen-image-2.1-fast|--ref-image REF|4|3|34.0|63.6|11.6"
+  "fasteditq4|Qwen-Image-2.1 fast 4-bit, edit|qwen-image-2.1-fast|--ref-image REF --quantize 4|4|3|15.5|70.0|13.0"
+  "qwen|Qwen-Image-2.1, 1024x1024|qwen-image-2.1||40|3|32.6|373.0|9.3"
+  "qwenedit|Qwen-Image-2.1, edit|qwen-image-2.1|--ref-image REF|40|3|34.0|444.5|10.7"
 )
 # Models (Hugging Face repo, download GB) in the order the tests use them.
 repo_of() {
@@ -107,7 +111,7 @@ for t in "${TESTS[@]}"; do
   IFS='|' read -r id label model extra steps runs peak ref ref_step <<<"$t"
   if fits "$peak" || [ $FORCE -eq 1 ]; then
     RUN_IDS="$RUN_IDS $id"
-    printf "  run   %-34s needs ~%s GB\n" "$label" "$peak"
+    printf "  run   %-38s needs ~%s GB\n" "$label" "$peak"
     for r in $(repo_of "$model"); do
       if ! cached "$r" && ! echo "$DOWNLOADS" | grep -q " $r"; then
         DOWNLOADS="$DOWNLOADS $r"
@@ -115,12 +119,13 @@ for t in "${TESTS[@]}"; do
       fi
     done
   else
-    printf "  skip  %-34s needs ~%s GB\n" "$label" "$peak"
+    printf "  skip  %-38s needs ~%s GB\n" "$label" "$peak"
   fi
 done
 echo
 if [ -z "$RUN_IDS" ]; then
-  echo "Nothing fits in $MEM_GB GB (the smallest test needs ~27 GB). --force tries anyway."
+  smallest="$(for t in "${TESTS[@]}"; do echo "$t" | cut -d'|' -f7; done | sort -n | head -1)"
+  echo "Nothing fits in $MEM_GB GB (the smallest test needs ~$smallest GB). --force tries anyway."
   exit 1
 fi
 if [ -n "$DOWNLOADS" ]; then
@@ -209,13 +214,16 @@ for t in "${TESTS[@]}"; do
       args+=(--prompt "$EDIT_PROMPT" ${extra//REF/$REF_IMAGE}) ;;
     *) args+=(--prompt "$PROMPT" $extra) ;;
   esac
-  # A 1-step warm-up per model: downloads the weights on first use and
-  # pages them into memory, so the timed runs measure generation only.
-  if ! echo "$WARMED " | grep -q " $model "; then
-    echo "Warming up $model (downloads its weights the first time)..."
-    run_mixel "$WORK/warmup-$model.log" --model "$model" --prompt "$PROMPT" --seed "$SEED" \
-      --width 512 --height 512 --num-steps 1 --output "$WORK/warmup-$model.png"
-    WARMED="$WARMED $model"
+  # A 1-step warm-up per model and quantization: downloads the weights on
+  # first use and pages them into memory, so the timed runs measure
+  # generation only.
+  quant="$(echo "$extra" | grep -o -- '--quantize [0-9]*')"
+  warm="$model${quant:+-q${quant##* }}"
+  if ! echo "$WARMED " | grep -q " $warm "; then
+    echo "Warming up $model${quant:+ $quant} (downloads its weights the first time)..."
+    run_mixel "$WORK/warmup-$warm.log" --model "$model" --prompt "$PROMPT" --seed "$SEED" \
+      --width 512 --height 512 --num-steps 1 --output "$WORK/warmup-$warm.png" $quant
+    WARMED="$WARMED $warm"
   fi
   ok_runs="" runs_json="" max_peak=0 max_swap=0
   for n in $(seq 1 "$runs"); do
@@ -233,7 +241,10 @@ for t in "${TESTS[@]}"; do
     max_peak="$(awk "BEGIN { print ($R_PEAK > $max_peak ? $R_PEAK : $max_peak) }")"
     max_swap="$(awk "BEGIN { print ($R_SWAP > $max_swap ? $R_SWAP : $max_swap) }")"
   done
-  [ "$id" = fast ] && [ -f "$WORK/fast.png" ] && REF_IMAGE="$WORK/fast.png"
+  # The edits start from the first 4-step image (a 4-bit one on small Macs).
+  case "$id" in fast|fastq4)
+    [ -z "$REF_IMAGE" ] && [ -f "$WORK/$id.png" ] && REF_IMAGE="$WORK/$id.png" ;;
+  esac
   runs_json="[${runs_json%, }]"
   if [ -z "$ok_runs" ]; then
     TABLE="$TABLE| $label | failed | | | | $ref s |\n"

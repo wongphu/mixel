@@ -66,7 +66,7 @@ fn main() -> Result<()> {
         .map(|i| files.get(&format!("text_encoder/model-{i:05}-of-00003.safetensors")))
         .collect::<Result<_>>()?;
     let m_cap =
-        zimage::text_encoder::TextEncoder::load(&te_files, Dtype::Bfloat16)?.forward(&ids)?;
+        zimage::text_encoder::TextEncoder::load(&te_files, Dtype::Bfloat16, None)?.forward(&ids)?;
     m_cap.eval()?;
     let c_cap = {
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&te_files, DType::BF16, &dev)? };
@@ -100,7 +100,7 @@ fn main() -> Result<()> {
         })
         .collect::<Result<_>>()?;
     let m_out = {
-        let tr = zimage::transformer::Transformer::load(&tr_files, Dtype::Bfloat16)?;
+        let tr = zimage::transformer::Transformer::load(&tr_files, Dtype::Bfloat16, None)?;
         let x = Array::from_slice(&noise, &shape.map(|d| d as i32)).as_dtype(Dtype::Bfloat16)?;
         let out = tr.forward(&x, 0.5, &m_cap)?;
         m_to_vec(&out)?

@@ -7,7 +7,7 @@
 //! down-shortcuts average over a zero frame padded in front, and the
 //! up-shortcuts keep only the second of their two temporal copies.
 
-use crate::nn::{scalar, silu, Weights};
+use crate::nn::{conv_in_bands, scalar, silu, Weights};
 use anyhow::Result;
 use mlx_rs::fast::scaled_dot_product_attention;
 use mlx_rs::ops::{broadcast_to, concatenate, conv2d, pad, split_at_indices};
@@ -87,8 +87,7 @@ impl Vae {
                 x = x.add(dup_up(&copy, cin, cout, factor_t)?)?;
             }
         }
-        let x = silu(&self.rms_norm(&x, "decoder.norm_out")?)?;
-        let x = self.conv(&x, "decoder.conv_out", 1, 1)?;
+        let x = self.norm_silu_conv(&x, "decoder.norm_out", "decoder.conv_out")?;
         Ok(mlx_rs::ops::clip(&x, (-1.0f32, 1.0f32))?)
     }
 
@@ -126,8 +125,7 @@ impl Vae {
         }
         x = self.mid_block("encoder.mid_block", &x)?;
         trace("enc_mid", &x);
-        let x = silu(&self.rms_norm(&x, "encoder.norm_out")?)?;
-        let x = self.conv(&x, "encoder.conv_out", 1, 1)?;
+        let x = self.norm_silu_conv(&x, "encoder.norm_out", "encoder.conv_out")?;
         let moments = self.conv(&x, "quant_conv", 0, 1)?;
         trace("enc_moments", &moments);
         let mean = split_at_indices(&moments, &[Z_DIM], -1)?.swap_remove(0);
@@ -141,15 +139,25 @@ impl Vae {
     }
 
     fn conv(&self, x: &Array, p: &str, padding: i32, stride: i32) -> Result<Array> {
-        let y = conv2d(
+        let weight = self.w.get(&format!("{p}.weight"))?;
+        let bias = self.w.get(&format!("{p}.bias"))?;
+        if stride == 1 {
+            return conv_in_bands(x, weight, Some(bias), padding, |x| Ok(x.clone()));
+        }
+        let y = conv2d(x, weight, (stride, stride), (padding, padding), None, None)?;
+        Ok(y.add(bias)?)
+    }
+
+    /// `conv(silu(rms_norm(x)))` with a 3x3 `conv`, in bands of rows (see
+    /// [`conv_in_bands`]); the norm is per pixel.
+    fn norm_silu_conv(&self, x: &Array, norm: &str, conv: &str) -> Result<Array> {
+        conv_in_bands(
             x,
-            self.w.get(&format!("{p}.weight"))?,
-            (stride, stride),
-            (padding, padding),
-            None,
-            None,
-        )?;
-        Ok(y.add(self.w.get(&format!("{p}.bias"))?)?)
+            self.w.get(&format!("{conv}.weight"))?,
+            Some(self.w.get(&format!("{conv}.bias"))?),
+            1,
+            |x| silu(&self.rms_norm(x, norm)?),
+        )
     }
 
     /// L2-normalizes channels (in f32), times sqrt(C) * gamma.
@@ -174,10 +182,8 @@ impl Vae {
         } else {
             x.clone()
         };
-        let y = silu(&self.rms_norm(x, &format!("{p}.norm1"))?)?;
-        let y = self.conv(&y, &format!("{p}.conv1"), 1, 1)?;
-        let y = silu(&self.rms_norm(&y, &format!("{p}.norm2"))?)?;
-        let y = self.conv(&y, &format!("{p}.conv2"), 1, 1)?;
+        let y = self.norm_silu_conv(x, &format!("{p}.norm1"), &format!("{p}.conv1"))?;
+        let y = self.norm_silu_conv(&y, &format!("{p}.norm2"), &format!("{p}.conv2"))?;
         Ok(y.add(h)?)
     }
 
