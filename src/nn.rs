@@ -524,17 +524,10 @@ mod tests {
         let w1 = mlx_rs::random::normal::<f32>(&[4, 1, 1, 8][..], None, None, &key(2)).unwrap();
         let b = Array::from_slice(&[0.5f32; 4], &[4]);
         let one = |w: &Array, padding: i32| {
-            mlx_rs::ops::conv2d(
-                silu(&x).unwrap(),
-                w,
-                (1, 1),
-                (padding, padding),
-                None,
-                None,
-            )
-            .unwrap()
-            .add(&b)
-            .unwrap()
+            mlx_rs::ops::conv2d(silu(&x).unwrap(), w, (1, 1), (padding, padding), None, None)
+                .unwrap()
+                .add(&b)
+                .unwrap()
         };
         // A 3x3 input row is 16 px * 8 channels * 9 * 4 bytes: bands of 7 rows
         // (the last one 2), of 1 row, and a single band.
