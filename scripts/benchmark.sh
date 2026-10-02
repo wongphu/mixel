@@ -87,6 +87,18 @@ MODEL_ID="$(sysctl -n hw.model)"
 MODEL_NAME="$(system_profiler SPHardwareDataType 2>/dev/null | awk -F': ' '/Model Name/ {print $2; exit}')"
 MEM_BYTES="$(sysctl -n hw.memsize)"
 MEM_GB="$(awk "BEGIN { printf \"%d\", $MEM_BYTES / $GIB }")"
+# The GPU may only use part of that (Metal's recommendedMaxWorkingSetSize: 81%
+# on a 96 GB Mac, about 2/3 on a 16 GB one), and a test that needs more runs
+# 2-3x slower (on a 16 GB M4, Z-Image-Turbo in bf16 at 13.4 GB). Ask Metal,
+# through Swift from Xcode's command line tools, else assume 2/3.
+GPU_WS_GB=""
+if command -v swift >/dev/null; then
+  ws_swift="$(mktemp -t mixel-ws).swift"
+  printf 'import Metal\nif let d = MTLCreateSystemDefaultDevice() { print(Double(d.recommendedMaxWorkingSetSize) / 1073741824) }\n' >"$ws_swift"
+  GPU_WS_GB="$(swift "$ws_swift" 2>/dev/null | tail -1 | awk '$1 + 0 > 0 { printf "%.1f", $1 }')"
+  rm -f "$ws_swift"
+fi
+[ -n "$GPU_WS_GB" ] || GPU_WS_GB="$(awk "BEGIN { printf \"%.1f\", $MEM_BYTES / $GIB * 2 / 3 }")"
 P_CORES="$(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo 0)"
 E_CORES="$(sysctl -n hw.perflevel1.physicalcpu 2>/dev/null || echo 0)"
 GPU_CORES="$(system_profiler SPDisplaysDataType 2>/dev/null | awk -F': ' '/Total Number of Cores/ {print $2; exit}')"
@@ -108,12 +120,12 @@ HW_LABEL="$CHIP, ${GPU_CORES:-?}-core GPU, ${MEM_GB} GB"
 # ---------- plan: what fits, what downloads ----------
 HF_HUB="${HF_HOME:-$HOME/.cache/huggingface}/hub"
 cached() { [ -d "$HF_HUB/models--$(echo "$1" | sed 's|/|--|')" ]; }
-LIMIT_GB="$(awk "BEGIN { printf \"%.1f\", $MEM_GB * 0.85 }")"
+LIMIT_GB="$GPU_WS_GB"
 fits() { awk "BEGIN { exit !($1 <= $LIMIT_GB) }"; }
 
 RUN_IDS="" DOWNLOADS="" DOWNLOAD_GB=0
 echo "mixel benchmark on: $HW_LABEL ($MODEL_NAME, macOS $OS_VERSION, $POWER)"
-echo "Tests use up to 85% of memory ($LIMIT_GB GB here); larger ones are skipped."
+echo "Tests fit in the GPU's working set ($LIMIT_GB of $MEM_GB GB here); larger ones are skipped."
 echo
 for t in "${TESTS[@]}"; do
   IFS='|' read -r id label model extra steps runs peak ref ref_step <<<"$t"
@@ -293,7 +305,7 @@ REPORT="$OUT/mixel-benchmark-$SAFE_LABEL-$(date +%Y-%m-%d).md"
   echo "| Chip | $CHIP |"
   echo "| CPU | $((P_CORES + E_CORES)) cores ($P_CORES performance, $E_CORES efficiency) |"
   echo "| GPU | ${GPU_CORES:-?} cores |"
-  echo "| Memory | $MEM_GB GB |"
+  echo "| Memory | $MEM_GB GB (GPU working set $GPU_WS_GB GB) |"
   echo "| macOS | $OS_VERSION ($OS_BUILD) |"
   echo "| Power | $POWER, energy mode $ENERGY |"
   echo
@@ -319,8 +331,9 @@ REPORT="$OUT/mixel-benchmark-$SAFE_LABEL-$(date +%Y-%m-%d).md"
   echo "- **Per step**: denoising time per step, the part that grows with the step count: Z-Image-Turbo"
   echo "  runs 9 steps, Qwen-Image-2.1 fast 4 and Qwen-Image-2.1 40."
   echo "- **Peak memory**: the most memory mixel used (1 GB = 2^30 bytes, as Apple counts RAM)."
-  echo "  Tests that need more than 85% of this Mac's memory are skipped. \"Swapped\" means macOS"
-  echo "  moved memory to disk during the test, which makes it slower than the chip can do."
+  echo "  Tests that need more than the GPU's working set (the part of memory macOS lets the GPU"
+  echo "  use) are skipped. \"Swapped\" means macOS moved memory to disk during the test, which"
+  echo "  makes it slower than the chip can do."
   echo "- **Settings**: prompt \"$PROMPT\" (edits: \"$EDIT_PROMPT\","
   echo "  on the fast test's image), seed $SEED. The tests run in the order above, so the later"
   echo "  ones start on an already warm Mac."
@@ -330,7 +343,7 @@ REPORT="$OUT/mixel-benchmark-$SAFE_LABEL-$(date +%Y-%m-%d).md"
   echo '```json'
   echo "{"
   echo "  \"schema\": 1,"
-  echo "  \"hardware\": {\"mac\": \"${MODEL_NAME:-unknown}\", \"model_id\": \"$MODEL_ID\", \"chip\": \"$CHIP\", \"cpu_performance_cores\": $P_CORES, \"cpu_efficiency_cores\": $E_CORES, \"gpu_cores\": ${GPU_CORES:-null}, \"memory_gb\": $MEM_GB, \"macos\": \"$OS_VERSION\", \"macos_build\": \"$OS_BUILD\", \"power\": \"$POWER\", \"energy_mode\": \"$ENERGY\"},"
+  echo "  \"hardware\": {\"mac\": \"${MODEL_NAME:-unknown}\", \"model_id\": \"$MODEL_ID\", \"chip\": \"$CHIP\", \"cpu_performance_cores\": $P_CORES, \"cpu_efficiency_cores\": $E_CORES, \"gpu_cores\": ${GPU_CORES:-null}, \"memory_gb\": $MEM_GB, \"gpu_working_set_gb\": $GPU_WS_GB, \"macos\": \"$OS_VERSION\", \"macos_build\": \"$OS_BUILD\", \"power\": \"$POWER\", \"energy_mode\": \"$ENERGY\"},"
   echo "  \"software\": {\"mixel\": \"$MIXEL_VERSION\", \"git\": \"$GIT_REV\", \"mlx_rs\": \"${MLX_RS:-}\"},"
   echo "  \"run\": {\"started\": \"$STARTED\", \"minutes\": $MINUTES, \"prompt\": \"$PROMPT\", \"edit_prompt\": \"$EDIT_PROMPT\", \"seed\": $SEED},"
   echo "  \"results\": ["

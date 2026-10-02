@@ -119,8 +119,20 @@ change. Peak memory, measured as the process footprint on the M3 Max:
 | Qwen-Image-2.1 (40 or 4 steps), 1024×1024 | 17.0 GB | 10.9 GB | **7.5 GB** |
 | Qwen-Image-2.1, edit with a ~1024×1024 image | 18.3 GB | 12.2 GB | **9.0 GB** |
 
-So, untested beyond this Mac: 4-bit Z-Image-Turbo should run on an 8 GB Mac, everything
-quantized (and Z-Image-Turbo in bf16) on 16 GB, and everything on 24 GB.
+**What runs well where.** The GPU may only use part of a Mac's memory (its working set:
+81% on this 96 GB Mac, about 2/3 on a 16 GB one), and a model that needs more runs 2–3×
+slower. Measured on a [16 GB Mac mini](benchmarks/) (M4, 10-core GPU), 1024×1024:
+
+| | Peak | Per image | Per step |
+|---|---:|---:|---:|
+| Z-Image-Turbo, `--quantize 8` / `4` | 8.2 / 5.4 GB | 166 s | 18.0 s |
+| Qwen-Image-2.1 in 4 steps, `--quantize 4` | 8.0 GB | 96 s | 22.6 s |
+| Qwen-Image-2.1 in 4 steps, edit, `--quantize 4` | 8.3 GB | 132 s | 25.7 s |
+| Z-Image-Turbo, bf16 (over the working set) | 13.4 GB | 182–374 s | ~40 s |
+
+So on 16 GB, use `--quantize 8` for Z-Image-Turbo (as fast as 4 bits there, and practically
+the bf16 images) and `--quantize 4` for Qwen-Image-2.1. An 8 GB Mac (~5.3 GB working set)
+is borderline even at 4 bits; 32 GB and up runs everything in bf16.
 
 - **8 bits gives practically the same images.** Each stage stays within 1–2% of bf16, about
   the noise between two bf16 implementations (Z-Image: text encoder 0.6–1.1%, one
@@ -220,11 +232,10 @@ scripts/benchmark.sh --dry-run   # what would run, and download, on this Mac
 scripts/benchmark.sh             # run it: ~65 min on an M3 Max
 ```
 
-It runs each test that fits in your Mac's memory: Z-Image-Turbo at 512×512 and 1024×1024
-(also in 8 and 4 bits), and Qwen-Image-2.1 in 4 and 40 steps, text-to-image and an edit (the
-4-step ones also in 4 bits). A 24 GB Mac runs them all, a 16 GB one all but the
-Qwen-Image-2.1 ones in bf16, and an 8 GB one the 4-bit Z-Image-Turbo test. It asks before downloading weights.
-The result is one file, `mixel-benchmark-<chip>-<gpu>-<memory>-<date>.md`, labelled with
+It runs each test that fits in your GPU's working set: Z-Image-Turbo at 512×512 and
+1024×1024 (also in 8 and 4 bits), and Qwen-Image-2.1 in 4 and 40 steps, text-to-image and an
+edit (the 4-step ones also in 4 bits). A 16 GB Mac runs the quantized tests, a 32 GB one
+all of them. It asks before downloading weights. The result is one file, `mixel-benchmark-<chip>-<gpu>-<memory>-<date>.md`, labelled with
 your Mac, chip, CPU and GPU cores, memory, macOS version and power source, with a table to
 read and a JSON block for us to compile.
 
@@ -232,7 +243,8 @@ read and a JSON block for us to compile.
 hardware summary and the timings: no serial numbers, hostnames, user names or images. For
 steadier numbers, plug in, close other apps and leave the Mac alone while it runs, with the
 lid open: the script keeps it from sleeping, but closing the lid still does.
-[`benchmarks/`](benchmarks/) has the reference report from an M3 Max.
+[`benchmarks/`](benchmarks/) has the reports so far: the reference from an M3 Max (96 GB), and
+an M4 Mac mini (16 GB).
 
 ## mixel vs candy
 

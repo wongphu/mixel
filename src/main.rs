@@ -144,8 +144,11 @@ Running it:
   - Less memory: --quantize 8 (~8 GB z-image-turbo, ~11-12 GB qwen) gives
     practically the same images; --quantize 4 (~5.4 GB, ~7.5-9 GB) gives
     images as good but not the same ones for a seed. Both are ~10-25%
-    slower per step. On an 8 GB Mac, z-image-turbo --quantize 4 should fit;
-    on 16 GB, either model with --quantize 4 or 8.
+    slower per step on an M3 Max (on an M4, 8 and 4 bits run at the same
+    speed). The GPU can use only part of the memory (~2/3 on a 16 GB Mac);
+    past that, steps run 2-3x slower. On a 16 GB Mac use z-image-turbo
+    --quantize 8 (~166 s per 1024x1024 image on an M4 Mac mini) and the qwen
+    models with --quantize 4 (~96 s, 4 steps); 32 GB runs everything in bf16.
   - The text encoders run first for all images (a batch in chunks), then
     are freed before the transformer loads, so the two phases print two
     \"Loaded in\" lines.
