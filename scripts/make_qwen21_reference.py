@@ -6,8 +6,10 @@ for `cargo run --release --example qwen21_parity -- <out-dir> <image>`.
 
     python make_qwen21_reference.py <model-snapshot-dir> <reference-image.png>
 
-Needs torch, diffusers >= 0.41 (with QwenImage21Pipeline) and transformers >= 5.
-Writes into the current directory.
+Needs torch, torchvision, diffusers >= 0.41 (with QwenImage21Pipeline) and
+transformers >= 5, and the whole snapshot (`hf download Qwen/Qwen-Image-2.1`).
+The image should be 512x512, the size the edit runs at (the parity example
+feeds it to the vision encoder as is). Writes into the current directory.
 """
 import json, sys, time
 import numpy as np, torch

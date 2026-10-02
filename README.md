@@ -307,7 +307,10 @@ bug); the adapter expects them in f32, as on CUDA, so the script turns that off.
 cargo test --release                  # unit + CLI tests, no model needed
 cargo test --release -- --ignored     # end-to-end generation with the real models
 
-# Parity with the PyTorch reference (needs torch and diffusers >= 0.41; see the scripts)
+# Parity with candle-transformers (no Python needed)
+cargo run --release --example parity -- 128
+
+# Parity with the PyTorch reference (each script writes into the current directory)
 python scripts/make_zimage_reference.py
 cargo run --release --example zimage_diffusers_parity -- .
 python scripts/make_qwen21_reference.py <qwen-snapshot-dir> fox.png
@@ -315,6 +318,13 @@ cargo run --release --example qwen21_parity -- . fox.png
 python scripts/make_qwen21_fast_reference.py <qwen-snapshot-dir> fox.png
 cargo run --release --example qwen21_fast_parity -- .
 ```
+
+The PyTorch scripts need torch, torchvision, transformers >= 5 and diffusers >= 0.41; until
+0.41 is on PyPI, `pip install git+https://github.com/huggingface/diffusers`. The Qwen ones
+need the whole Qwen-Image-2.1 snapshot (`hf download Qwen/Qwen-Image-2.1`; mixel itself only
+fetches the files it uses, without `model_index.json` and the configs), and `fox.png` must be
+512×512, the size the scripts run the edit at. Last run 2026-10-02 (torch 2.14.1, diffusers
+main at 578c9b2): every stage within the numbers above.
 
 ## Building
 

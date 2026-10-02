@@ -6,7 +6,7 @@
 //! ```
 //!
 //! `<ref-dir>` holds `t2i.safetensors`, `edit.safetensors` and the noise files
-//! written by `scripts/make_qwen21_reference.py` (run with the same image).
+//! written by `scripts/make_qwen21_reference.py` (run with the same 512x512 image).
 //! Each stage gets the reference's own inputs, so an error points at that
 //! stage. bf16 noise is around 1e-2; a bug is ~1.
 //!
@@ -113,6 +113,14 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let dir = Path::new(&args[1]);
     let ref_image = image::open(&args[2])?.to_rgb8();
+    // The vision encoder gets the image as is; the script's processor resizes
+    // it to the edit's 512x512.
+    anyhow::ensure!(
+        ref_image.dimensions() == (512, 512),
+        "{} is {:?}; use a 512x512 image, the size the reference script edits at",
+        args[2],
+        ref_image.dimensions()
+    );
     let files = ModelFiles::new(REPO, None)?;
     let bf16 = Dtype::Bfloat16;
     let t2i = load(dir, "t2i.safetensors")?;

@@ -8,8 +8,9 @@ image, for a text-to-image and an edit run, for
 
     python make_qwen21_fast_reference.py <model-snapshot-dir> <reference-image.png>
 
-Needs torch, diffusers >= 0.41 (with QwenImage21Pipeline), transformers >= 5 and
-huggingface_hub. Writes into the current directory.
+Needs torch, torchvision, diffusers >= 0.41 (with QwenImage21Pipeline),
+transformers >= 5 and huggingface_hub, and the whole snapshot
+(`hf download Qwen/Qwen-Image-2.1`). Writes into the current directory.
 """
 import json, sys, time
 from contextlib import contextmanager
