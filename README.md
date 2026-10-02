@@ -27,6 +27,8 @@ mixel --model qwen-image-2.1 --prompt "A capybara wearing a wizard hat, oil pain
 mixel --model qwen-fast --ref-image fox.png --prompt "Turn the fox into a gray wolf" --seed 1
 ```
 
+- Or download a ready-made `mixel` for macOS 14 or later from
+  [Releases](https://github.com/wongphu/mixel/releases), and keep `mlx.metallib` next to it.
 - The first run downloads the weights to `~/.cache/huggingface`: ~33 GB for Z-Image-Turbo
   (shared with `candy`), ~31 GB for Qwen-Image-2.1, plus 0.35 GB for the 4-step adapter.
 - Without `--seed`, a random seed is used and added to the filename (`z_image_output-1234567.png`).
@@ -363,6 +365,13 @@ mlx-rs compiles MLX from source, which needs:
 - Xcode's Metal Toolchain: `xcodebuild -downloadComponent MetalToolchain`
 
 The candle crates are dev-dependencies, used only by `examples/parity.rs`.
+
+A local build targets your own macOS version: MLX builds for the build machine's macOS
+unless `MACOSX_DEPLOYMENT_TARGET` says otherwise, and the binary and its GPU kernels
+(`mlx.metallib`) then need that version or later. `scripts/release.sh <version>` builds the
+released binaries for macOS 14, MLX's minimum, tests and packages them, and commits and
+tags the release. On macOS 14, MLX leaves out its NAX kernels for M5 GPUs (they need 26.2),
+so on an M5 a local build may be faster.
 
 ## License
 
