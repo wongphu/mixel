@@ -107,6 +107,16 @@ fn quantize_takes_8_or_4_bits() {
 }
 
 #[test]
+fn no_cache_needs_quantize() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = mixel(&["--no-cache", "--prompt", "x"], dir.path());
+    assert!(!out.status.success());
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("--quantize"), "{stderr}");
+    assert!(!text(&out.stdout).contains("Loading"));
+}
+
+#[test]
 fn help_documents_batch_mode() {
     let out = mixel(&["--help"], Path::new("."));
     let stdout = text(&out.stdout);

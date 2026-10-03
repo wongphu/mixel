@@ -146,7 +146,15 @@ is borderline even at 4 bits; 32 GB and up runs everything in bf16.
 - **Both are slower per step**, as MLX's quantized matmuls unpack the weights as they go: in
   the [reference benchmark](benchmarks/), a 1024×1024 Z-Image-Turbo step takes 7.7 s at 8
   bits and 7.9 s at 4 against 6.3 s in bf16, and a 4-step Qwen-Image-2.1 step 10.3 s at 4
-  bits against 8.7 s (an edit 11.7 against 10.5). Loading takes ~2 s longer.
+  bits against 8.7 s (an edit 11.7 against 10.5).
+- **The quantized weights are saved after the first run**, to `~/.cache/mixel/weights` (6.0
+  GB for Z-Image-Turbo at 4 bits, 8.7 GB for Qwen-Image-2.1), and later runs load them
+  instead of reading the full-precision files (33 GB for Z-Image-Turbo, including a 24.6 GB
+  f32 transformer) and quantizing them again. On the M3 Max a warm load takes ~1 s instead
+  of ~3.5 s; a Mac with less memory, which can't keep the source files in its file cache,
+  saves more (a 16 GB Mac mini spent ~17 s loading). The entries are tied to the source
+  files and the mixel version, and a new one replaces the old; `--no-cache` skips the cache,
+  and `rm -rf ~/.cache/mixel` frees the space.
 - `cargo run --release --example quantize_parity -- <model>` compares the stages and whole
   images against bf16; `cargo run --release --example memory -- <model> <size> <bf16|8|4>`
   shows the memory in each phase.
@@ -202,8 +210,9 @@ let encoded = load(Parts::Encoders)?.encode(&opts)?; // the encoders are freed h
 load(Parts::Generator)?.generate_encoded(&opts, &encoded)?.image.save("fox-4bit.png")?;
 ```
 
-The library prints nothing and never writes files; the `mixel` command adds the CLI,
-JSONL batching, seed-in-filename naming and saving. The models themselves are in
+The library prints nothing and writes no files (unless `LoadOptions::weight_cache` is set);
+the `mixel` command adds the CLI, JSONL batching, seed-in-filename naming, saving, and the
+weight cache in `~/.cache/mixel`. The models themselves are in
 `mixel::zimage` and `mixel::qwen21` for lower-level use.
 
 ## Batch mode (JSONL)

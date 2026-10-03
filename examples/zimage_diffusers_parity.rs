@@ -200,6 +200,7 @@ fn main() -> Result<()> {
                 .collect::<Result<Vec<_>>>()?,
             bf16,
             None,
+            None,
         )?;
         let feats = te.forward(&ids)?;
         feats.eval()?;
@@ -220,6 +221,7 @@ fn main() -> Result<()> {
             })
             .collect::<Result<Vec<_>>>()?,
         bf16,
+        None,
         None,
     )?;
     let x_plain = run("No guidance", &tr, &rec, noise, None)?;

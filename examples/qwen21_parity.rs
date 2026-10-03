@@ -189,6 +189,7 @@ fn main() -> Result<()> {
             .collect::<Result<Vec<_>>>()?,
         bf16,
         None,
+        None,
     )?;
     let h = te.forward(&p_t2i.ids, &p_t2i.positions, &[])?;
     report(
@@ -253,6 +254,7 @@ fn main() -> Result<()> {
             })
             .collect::<Result<Vec<_>>>()?,
         bf16,
+        None,
         None,
     )?;
     let t0 = vec(&t2i["tr_timestep"])?[0];

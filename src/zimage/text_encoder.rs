@@ -1,7 +1,7 @@
 //! Qwen3 text encoder, returning the second-to-last layer's hidden states
 //! (no final norm), ported from candle's `z_image::text_encoder`.
 
-use super::{linear, rms_norm, silu, Quantize, Weights};
+use super::{linear, rms_norm, silu, Quantize, WeightCache, Weights};
 use anyhow::Result;
 use mlx_rs::fast::{rope, scaled_dot_product_attention, ScaledDotProductAttentionMask};
 use mlx_rs::{Array, Dtype};
@@ -27,6 +27,7 @@ impl TextEncoder {
         files: &[impl AsRef<Path>],
         dtype: Dtype,
         quantize: Option<Quantize>,
+        cache: Option<&WeightCache>,
     ) -> Result<Self> {
         let keep = |name: &str| {
             if name == "model.embed_tokens.weight" {
@@ -37,9 +38,15 @@ impl TextEncoder {
                 .and_then(|i| i.parse::<usize>().ok())
                 .is_some_and(|i| i <= LAST_LAYER)
         };
-        let w = Weights::load_quantized(files, dtype, keep, quantize, |layer| {
-            layer.starts_with("model.layers.")
-        })?;
+        let w = Weights::load_maybe_cached(
+            files,
+            dtype,
+            keep,
+            quantize,
+            |layer| layer.starts_with("model.layers."),
+            cache,
+            "zimage-text-encoder",
+        )?;
         Ok(Self { w })
     }
 

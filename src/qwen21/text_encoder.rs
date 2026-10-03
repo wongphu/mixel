@@ -4,7 +4,7 @@
 //! Returns the last decoder layer's hidden states *before* the final RMSNorm,
 //! which is what the Qwen-Image-2.1 transformer was trained on.
 
-use crate::nn::{linear, rms_norm, rotate_half, silu, split_seq, Quantize, Weights};
+use crate::nn::{linear, rms_norm, rotate_half, silu, split_seq, Quantize, WeightCache, Weights};
 use anyhow::Result;
 use mlx_rs::fast::{scaled_dot_product_attention, ScaledDotProductAttentionMask};
 use mlx_rs::ops::concatenate;
@@ -45,13 +45,16 @@ impl TextEncoder {
         files: &[impl AsRef<Path>],
         dtype: Dtype,
         quantize: Option<Quantize>,
+        cache: Option<&WeightCache>,
     ) -> Result<Self> {
-        let w = Weights::load_quantized(
+        let w = Weights::load_maybe_cached(
             files,
             dtype,
             |n| n.starts_with("model.language_model."),
             quantize,
             |layer| layer.starts_with("model.language_model.layers."),
+            cache,
+            "qwen21-text-encoder",
         )?;
         Ok(Self { w, dtype })
     }

@@ -4,8 +4,9 @@
 use anyhow::{Context, Result};
 use mlx_rs::ops::indexing::IndexOp;
 use mlx_rs::{Array, Dtype};
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Weight-only quantization of linear layers: MLX's affine quantization,
 /// with a scale and bias per group of [`GROUP_SIZE`] weights.
@@ -137,6 +138,159 @@ impl Weights {
         })
     }
 
+    /// [`Weights::load_quantized`], through `cache` (as `name`) when there is
+    /// one and `quantize` is set.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_maybe_cached(
+        files: &[impl AsRef<Path>],
+        dtype: Dtype,
+        keep: impl Fn(&str) -> bool,
+        quantize: Option<Quantize>,
+        layers: impl Fn(&str) -> bool,
+        cache: Option<&WeightCache>,
+        name: &str,
+    ) -> Result<Self> {
+        match (quantize, cache) {
+            (Some(q), Some(c)) => {
+                Self::load_quantized_cached(files, dtype, keep, q, layers, c, name)
+            }
+            _ => Self::load_quantized(files, dtype, keep, quantize, layers),
+        }
+    }
+
+    /// [`Weights::load_quantized`] through `cache`: loads the quantized
+    /// weights from it if it has them for these files, else loads and
+    /// quantizes the files and saves the result there as `name`.
+    pub fn load_quantized_cached(
+        files: &[impl AsRef<Path>],
+        dtype: Dtype,
+        keep: impl Fn(&str) -> bool,
+        quantize: Quantize,
+        layers: impl Fn(&str) -> bool,
+        cache: &WeightCache,
+        name: &str,
+    ) -> Result<Self> {
+        let (path, prefix) = cache.path(name, files, dtype, quantize)?;
+        if path.exists() {
+            match Self::load_cache_file(&path, quantize) {
+                Ok(w) => return Ok(w),
+                Err(e) => cache.note(format!(
+                    "rebuilding {}, which couldn't be read: {e:#}",
+                    path.display()
+                )),
+            }
+        }
+        let w = Self::load_quantized(files, dtype, keep, Some(quantize), layers)?;
+        match w.save_cache_file(&path, quantize) {
+            Ok(bytes) => {
+                let removed = cache.remove_stale(&prefix, &path);
+                cache.note(format!(
+                    "saved {:.1} GB of {}-bit {name} weights to {}{}",
+                    bytes as f64 / (1u64 << 30) as f64,
+                    quantize.bits(),
+                    path.display(),
+                    if removed > 0 {
+                        " (replacing an older copy)"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+            Err(e) => cache.note(format!("couldn't save {}: {e:#}", path.display())),
+        }
+        Ok(w)
+    }
+
+    /// Writes every tensor, quantized ones as `{layer}.weight` (packed) with
+    /// `.scales` and `.biases`, to a temporary file renamed to `path`.
+    /// Returns its size.
+    fn save_cache_file(&self, path: &Path, quantize: Quantize) -> Result<u64> {
+        let dir = path.parent().context("cache file without a directory")?;
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        // MLX only writes files named *.safetensors; the leading dot keeps
+        // another run's cleanup (WeightCache::remove_stale) away from it.
+        let file = path.file_name().context("cache file without a name")?;
+        let tmp = dir.join(format!(
+            ".tmp-{}-{}",
+            std::process::id(),
+            file.to_string_lossy()
+        ));
+        let mut arrays: Vec<(String, &Array)> =
+            self.map.iter().map(|(k, v)| (k.clone(), v)).collect();
+        for (layer, q) in &self.quantized {
+            arrays.push((format!("{layer}.weight"), &q.w));
+            arrays.push((format!("{layer}.weight.scales"), &q.scales));
+            arrays.push((format!("{layer}.weight.biases"), &q.biases));
+        }
+        let metadata = HashMap::from([
+            ("mixel_cache".to_string(), CACHE_FORMAT.to_string()),
+            ("bits".to_string(), quantize.bits().to_string()),
+            ("group_size".to_string(), GROUP_SIZE.to_string()),
+        ]);
+        let saved = Array::save_safetensors(arrays, &metadata, &tmp)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| Ok(std::fs::rename(&tmp, path)?));
+        if saved.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        saved?;
+        Ok(std::fs::metadata(path)?.len())
+    }
+
+    /// Reads a file written by [`save_cache_file`](Self::save_cache_file).
+    fn load_cache_file(path: &Path, quantize: Quantize) -> Result<Self> {
+        let (mut arrays, metadata) = Array::load_safetensors_with_metadata(path)?;
+        let meta = |k: &str| metadata.get(k).map(String::as_str);
+        anyhow::ensure!(
+            meta("mixel_cache") == Some(CACHE_FORMAT)
+                && meta("bits") == Some(quantize.bits().to_string().as_str())
+                && meta("group_size") == Some(GROUP_SIZE.to_string().as_str()),
+            "not a {}-bit mixel cache file (format {CACHE_FORMAT})",
+            quantize.bits()
+        );
+        let layers: Vec<String> = arrays
+            .keys()
+            .filter_map(|k| k.strip_suffix(".weight.scales").map(str::to_string))
+            .collect();
+        let mut quantized = HashMap::new();
+        for layer in layers {
+            let mut take = |suffix: &str| {
+                arrays
+                    .remove(&format!("{layer}.{suffix}"))
+                    .with_context(|| format!("missing {layer}.{suffix}"))
+            };
+            let (w, scales, biases) = (
+                take("weight")?,
+                take("weight.scales")?,
+                take("weight.biases")?,
+            );
+            let bits = quantize.bits();
+            let shape = vec![w.shape()[0], w.shape()[1] * 32 / bits];
+            quantized.insert(
+                layer,
+                QuantizedWeight {
+                    w,
+                    scales,
+                    biases,
+                    bits,
+                    shape,
+                },
+            );
+        }
+        mlx_rs::transforms::eval(
+            arrays.values().chain(
+                quantized
+                    .values()
+                    .flat_map(|q| [&q.w, &q.scales, &q.biases]),
+            ),
+        )?;
+        Ok(Self {
+            map: arrays,
+            quantized,
+            lora: HashMap::new(),
+        })
+    }
+
     pub fn get(&self, name: &str) -> Result<&Array> {
         if let Some(layer) = name.strip_suffix(".weight") {
             anyhow::ensure!(
@@ -199,6 +353,119 @@ impl Weights {
         );
         self.lora.insert(prefix.to_string(), (down, up));
         Ok(())
+    }
+}
+
+/// Bumped whenever what a cache file holds changes for the same files.
+const CACHE_FORMAT: &str = "1";
+
+/// Where quantized weights are saved after their first load, so later loads
+/// read them instead of the full-precision files (Z-Image-Turbo: 33 GB of
+/// files, 6 GB at 4 bits) and skip quantizing. Entries are keyed by the
+/// source files (path, size, modification time), the mixel version, dtype
+/// and bits; saving one removes older entries for the same weights.
+pub struct WeightCache {
+    dir: PathBuf,
+    notes: RefCell<Vec<String>>,
+}
+
+impl WeightCache {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            dir: dir.into(),
+            notes: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// What happened since the last call: entries saved, or failures to
+    /// save or read them (which don't fail the load).
+    pub fn take_notes(&self) -> Vec<String> {
+        std::mem::take(&mut self.notes.borrow_mut())
+    }
+
+    fn note(&self, note: String) {
+        self.notes.borrow_mut().push(note);
+    }
+
+    /// The cache file for `name` loaded from `files`, and the prefix it
+    /// shares with older entries for the same weights.
+    fn path(
+        &self,
+        name: &str,
+        files: &[impl AsRef<Path>],
+        dtype: Dtype,
+        quantize: Quantize,
+    ) -> Result<(PathBuf, String)> {
+        let mut key = Fnv::default();
+        let mut source = Fnv::default();
+        for part in [
+            CACHE_FORMAT,
+            env!("CARGO_PKG_VERSION"),
+            name,
+            &format!("{dtype:?}"),
+        ] {
+            key.write(part.as_bytes());
+        }
+        key.write(&[quantize.bits() as u8]);
+        key.write(&GROUP_SIZE.to_le_bytes());
+        for (i, file) in files.iter().enumerate() {
+            // Hugging Face snapshot files are links to content-addressed blobs.
+            let real = std::fs::canonicalize(file.as_ref())
+                .with_context(|| format!("reading {}", file.as_ref().display()))?;
+            let meta = std::fs::metadata(&real)?;
+            let modified = meta
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            key.write(real.as_os_str().as_encoded_bytes());
+            key.write(&meta.len().to_le_bytes());
+            key.write(&modified.as_nanos().to_le_bytes());
+            if i == 0 {
+                if let Some(dir) = real.parent() {
+                    source.write(dir.as_os_str().as_encoded_bytes());
+                }
+            }
+        }
+        let prefix = format!("{name}-q{}-{:08x}-", quantize.bits(), source.0 as u32);
+        let path = self.dir.join(format!("{prefix}{:016x}.safetensors", key.0));
+        Ok((path, prefix))
+    }
+
+    /// Removes entries with `prefix` other than `keep`; returns how many.
+    fn remove_stale(&self, prefix: &str, keep: &Path) -> usize {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return 0;
+        };
+        let mut removed = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let stale = path != keep
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with(prefix) && n.ends_with(".safetensors"));
+            if stale && std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+}
+
+/// 64-bit FNV-1a, for cache keys.
+struct Fnv(u64);
+
+impl Default for Fnv {
+    fn default() -> Self {
+        Self(0xcbf29ce484222325)
+    }
+}
+
+impl Fnv {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 ^ b as u64).wrapping_mul(0x100000001b3);
+        }
     }
 }
 
@@ -540,5 +807,66 @@ mod tests {
                 assert!(rel_err(&banded, &expected) < 1e-6, "{band_bytes}");
             }
         }
+    }
+
+    #[test]
+    fn quantized_weights_round_trip_through_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("w.safetensors");
+        let key = mlx_rs::random::key(0).unwrap();
+        let weight = mlx_rs::random::normal::<f32>(&[64, 128][..], None, None, &key).unwrap();
+        let norm = Array::from_slice(&[1.0f32; 128], &[128]);
+        let save = |w: &Array| {
+            Array::save_safetensors([("l.weight", w), ("n.weight", &norm)], None, &src).unwrap()
+        };
+        save(&weight);
+        let cache = WeightCache::new(dir.path().join("cache"));
+        let load = || {
+            Weights::load_quantized_cached(
+                &[&src],
+                Dtype::Float32,
+                |_| true,
+                Quantize::Q4,
+                |l| l == "l",
+                &cache,
+                "test",
+            )
+            .unwrap()
+        };
+        let entries = || std::fs::read_dir(dir.path().join("cache")).map_or(0, |d| d.count());
+        let x = mlx_rs::random::normal::<f32>(&[2, 128][..], None, None, &key).unwrap();
+
+        // The first load quantizes and saves; the second reads the same back.
+        let first = linear(&x, &load(), "l").unwrap();
+        let notes = cache.take_notes();
+        assert!(notes.len() == 1 && notes[0].contains("saved"), "{notes:?}");
+        let second = load();
+        assert!(cache.take_notes().is_empty());
+        assert_eq!(rel_err(&linear(&x, &second, "l").unwrap(), &first), 0.0);
+        assert_eq!(second.shape("l.weight").unwrap(), [64, 128]);
+        assert!(second.get("n.weight").is_ok() && second.get("l.weight").is_err());
+
+        // Changed source files get a new entry, which replaces the old one.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        save(&weight.multiply(Array::from_f32(2.0)).unwrap());
+        let doubled = linear(&x, &load(), "l").unwrap();
+        assert!(cache.take_notes()[0].contains("replacing an older copy"));
+        assert_eq!(entries(), 1);
+        assert!((rel_err(&doubled, &first) - 1.0).abs() < 1e-3);
+
+        // An unreadable entry is rebuilt.
+        let entry = std::fs::read_dir(dir.path().join("cache"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        std::fs::write(entry.path(), b"not safetensors").unwrap();
+        let rebuilt = linear(&x, &load(), "l").unwrap();
+        let notes = cache.take_notes();
+        assert!(
+            notes[0].contains("couldn't be read") && notes[1].contains("saved"),
+            "{notes:?}"
+        );
+        assert_eq!(rel_err(&rebuilt, &doubled), 0.0);
     }
 }

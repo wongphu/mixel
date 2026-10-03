@@ -84,7 +84,7 @@ fn zimage_stages() -> Result<()> {
     }
     let mut reference = Vec::new();
     for (q, name) in LEVELS {
-        let te = TextEncoder::load(&te_files, bf16, q)?;
+        let te = TextEncoder::load(&te_files, bf16, q, None)?;
         let feats = caps
             .iter()
             .map(|ids| {
@@ -111,7 +111,7 @@ fn zimage_stages() -> Result<()> {
         mlx_rs::random::normal::<f32>(&[1, 16, 128, 128][..], None, None, &key)?.as_dtype(bf16)?;
     let mut out_ref = Vec::new();
     for (q, name) in LEVELS {
-        let tr = Transformer::load(&tr_files, bf16, q)?;
+        let tr = Transformer::load(&tr_files, bf16, q, None)?;
         let outs = reference
             .iter()
             .map(|cap| {

@@ -218,6 +218,7 @@ fn main() -> Result<()> {
             .collect::<Result<Vec<_>>>()?,
         bf16,
         None,
+        None,
     )?;
     tr.apply_adapter(adapter)?;
     let noise = load(dir, "fast_t2i_noise.safetensors")?;

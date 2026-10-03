@@ -1,6 +1,6 @@
 //! The end-to-end text-to-image pipeline.
 
-use crate::nn::{ModelFiles, Quantize};
+use crate::nn::{ModelFiles, Quantize, WeightCache};
 use crate::qwen21::pipeline::QwenPipeline;
 use crate::zimage::pipeline::ZImagePipeline;
 use anyhow::Result;
@@ -151,6 +151,12 @@ pub struct LoadOptions {
     pub quantize: Option<Quantize>,
     /// Which parts to load (all by default).
     pub parts: Parts,
+    /// With `quantize`: a directory to save the quantized weights in after
+    /// their first load, and load them from afterwards, instead of reading
+    /// and quantizing the full-precision files each time (Z-Image-Turbo: 33
+    /// GB of files, 6 GB at 4 bits). Off by default: the library writes no
+    /// files unless asked. [`Pipeline::notes`] says what it saved.
+    pub weight_cache: Option<PathBuf>,
 }
 
 /// What to generate.
@@ -381,6 +387,7 @@ pub struct Generated {
 pub struct Pipeline {
     model: Model,
     inner: Inner,
+    notes: Vec<String>,
 }
 
 enum Inner {
@@ -402,17 +409,21 @@ impl Pipeline {
         mlx_rs::memory::set_cache_limit(0)?;
         let repo = opts.repo.as_deref().unwrap_or(opts.model.repo());
         let files = ModelFiles::new(repo, opts.model_path.as_deref())?;
+        let cache = opts.weight_cache.as_ref().map(WeightCache::new);
+        let cache = cache.as_ref();
         let inner = match opts.model {
             Model::ZImageTurbo => Inner::ZImage(Box::new(ZImagePipeline::load(
                 &files,
                 opts.quantize,
                 opts.parts,
+                cache,
             )?)),
             Model::QwenImage21 => Inner::Qwen(Box::new(QwenPipeline::load(
                 &files,
                 None,
                 opts.quantize,
                 opts.parts,
+                cache,
             )?)),
             Model::QwenImage21Fast => {
                 let adapter = ModelFiles::new(crate::qwen21::fast::REPO, None)?;
@@ -421,13 +432,21 @@ impl Pipeline {
                     Some(&adapter),
                     opts.quantize,
                     opts.parts,
+                    cache,
                 )?))
             }
         };
         Ok(Self {
             model: opts.model,
             inner,
+            notes: cache.map(WeightCache::take_notes).unwrap_or_default(),
         })
+    }
+
+    /// What loading did with [`LoadOptions::weight_cache`]: entries saved,
+    /// or failures to save or read them (which don't fail the load).
+    pub fn notes(&self) -> &[String] {
+        &self.notes
     }
 
     pub fn model(&self) -> Model {

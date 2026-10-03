@@ -10,7 +10,9 @@
 //! target image's tokens per step (the reference pipeline's KV cache).
 
 use super::fast::Adapter;
-use crate::nn::{gelu_tanh, layer_norm, linear, rms_norm, silu, split_seq, Quantize, Weights};
+use crate::nn::{
+    gelu_tanh, layer_norm, linear, rms_norm, silu, split_seq, Quantize, WeightCache, Weights,
+};
 use anyhow::{Context, Result};
 use mlx_rs::fast::{scaled_dot_product_attention, ScaledDotProductAttentionMask};
 use mlx_rs::ops::{concatenate, split_at_indices, tanh};
@@ -61,13 +63,22 @@ impl Transformer {
         files: &[impl AsRef<Path>],
         dtype: Dtype,
         quantize: Option<Quantize>,
+        cache: Option<&WeightCache>,
     ) -> Result<Self> {
         let blocks = |layer: &str| {
             layer.starts_with("transformer_blocks.")
                 && (layer.contains(".attn.") || layer.contains(".img_mlp."))
         };
         Ok(Self {
-            w: Weights::load_quantized(files, dtype, |_| true, quantize, blocks)?,
+            w: Weights::load_maybe_cached(
+                files,
+                dtype,
+                |_| true,
+                quantize,
+                blocks,
+                cache,
+                "qwen21-transformer",
+            )?,
             dtype,
             heads: Vec::new(),
         })

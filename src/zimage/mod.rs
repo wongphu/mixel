@@ -15,4 +15,4 @@ pub mod text_encoder;
 pub mod transformer;
 pub mod vae;
 
-pub use crate::nn::{linear, rms_norm, scalar, silu, ModelFiles, Quantize, Weights};
+pub use crate::nn::{linear, rms_norm, scalar, silu, ModelFiles, Quantize, WeightCache, Weights};

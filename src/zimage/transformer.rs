@@ -1,7 +1,7 @@
 //! Z-Image DiT (ZImageTransformer2DModel), ported from candle's
 //! `z_image::transformer`.
 
-use super::{linear, rms_norm, scalar, silu, Quantize, Weights};
+use super::{linear, rms_norm, scalar, silu, Quantize, WeightCache, Weights};
 use anyhow::Result;
 use mlx_rs::fast::scaled_dot_product_attention;
 use mlx_rs::ops::{concatenate, split_at_indices, tanh};
@@ -51,13 +51,16 @@ impl Transformer {
         files: &[impl AsRef<Path>],
         dtype: Dtype,
         quantize: Option<Quantize>,
+        cache: Option<&WeightCache>,
     ) -> Result<Self> {
-        let w = Weights::load_quantized(
+        let w = Weights::load_maybe_cached(
             files,
             dtype,
             |_| true,
             quantize,
             |layer| layer.contains(".attention.") || layer.contains(".feed_forward."),
+            cache,
+            "zimage-transformer",
         )?;
         let mut rope_cos = Vec::new();
         let mut rope_sin = Vec::new();

@@ -149,6 +149,10 @@ Running it:
     past that, steps run 2-3x slower. On a 16 GB Mac use z-image-turbo
     --quantize 8 (~166 s per 1024x1024 image on an M4 Mac mini) and the qwen
     models with --quantize 4 (~96 s, 4 steps); 32 GB runs everything in bf16.
+  - With --quantize, the first run saves the quantized weights to
+    ~/.cache/mixel/weights (6 GB for z-image-turbo at 4 bits, 8.7 GB for
+    qwen) and later runs load them in about a second; --no-cache skips it.
+    Delete ~/.cache/mixel to free the space.
   - The text encoders run first for all images (a batch in chunks), then
     are freed before the transformer loads, so the two phases print two
     \"Loaded in\" lines.
@@ -231,9 +235,15 @@ struct Args {
     model: ModelArg,
 
     /// Quantize the model's large layers to 8 or 4 bits as it loads, to fit
-    /// in less memory.
+    /// in less memory. The first run saves them to ~/.cache/mixel/weights
+    /// (~6 GB for z-image-turbo at 4 bits), so later runs load much faster.
     #[arg(long, value_enum)]
     quantize: Option<QuantizeArg>,
+
+    /// With --quantize: don't save or use the quantized weights in
+    /// ~/.cache/mixel/weights.
+    #[arg(long, requires = "quantize")]
+    no_cache: bool,
 
     /// Override path to the model weights directory (uses HuggingFace by default).
     #[arg(long)]
@@ -767,15 +777,24 @@ fn run(args: Args) -> Result<()> {
         Some(p) => format!("from {p}"),
         None => model.repo().to_string(),
     };
+    let weight_cache = match std::env::var_os("HOME") {
+        Some(home) if !args.no_cache => Some(PathBuf::from(home).join(".cache/mixel/weights")),
+        _ => None,
+    };
     let load = |parts: Parts| {
-        Pipeline::load(&LoadOptions {
+        let pipeline = Pipeline::load(&LoadOptions {
             model,
             repo: None,
             model_path: args.model_path.as_ref().map(PathBuf::from),
             cpu: args.cpu,
             quantize: args.quantize.map(QuantizeArg::quantize),
             parts,
-        })
+            weight_cache: weight_cache.clone(),
+        })?;
+        for note in pipeline.notes() {
+            println!("Cache: {note}");
+        }
+        anyhow::Ok(pipeline)
     };
     let encoders = if model.supports_reference_images() {
         "text and vision encoders"

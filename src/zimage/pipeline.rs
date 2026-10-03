@@ -2,7 +2,7 @@
 
 use super::{
     scalar, scheduler::Scheduler, text_encoder::TextEncoder, transformer::Transformer, vae::Vae,
-    ModelFiles, Quantize,
+    ModelFiles, Quantize, WeightCache,
 };
 use crate::pipeline::{
     resize_to_fill, seeded_noise, to_rgb_image, GenerateOptions, Generated, Parts, Progress,
@@ -47,7 +47,13 @@ impl ZImagePipeline {
     /// Loads the tokenizer and the given `parts`: the text encoder, and the
     /// transformer and VAE, with the text encoder and transformer quantized
     /// if `quantize` is set.
-    pub fn load(files: &ModelFiles, quantize: Option<Quantize>, parts: Parts) -> Result<Self> {
+    /// Quantized weights go through `cache` when given.
+    pub fn load(
+        files: &ModelFiles,
+        quantize: Option<Quantize>,
+        parts: Parts,
+        cache: Option<&WeightCache>,
+    ) -> Result<Self> {
         let dtype = Dtype::Bfloat16;
 
         let tokenizer =
@@ -56,7 +62,7 @@ impl ZImagePipeline {
             let te_files = (1..=3)
                 .map(|i| files.get(&format!("text_encoder/model-{i:05}-of-00003.safetensors")))
                 .collect::<Result<Vec<_>>>()?;
-            Some(TextEncoder::load(&te_files, dtype, quantize)?)
+            Some(TextEncoder::load(&te_files, dtype, quantize, cache)?)
         } else {
             None
         };
@@ -68,7 +74,7 @@ impl ZImagePipeline {
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let transformer = Transformer::load(&tr_files, dtype, quantize)?;
+            let transformer = Transformer::load(&tr_files, dtype, quantize, cache)?;
             let vae = Vae::load(files.get("vae/diffusion_pytorch_model.safetensors")?, dtype)?;
             (Some(transformer), Some(vae))
         } else {
