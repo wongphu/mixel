@@ -151,11 +151,12 @@ Running it:
     slower per step on an M3 Max (on an M4, 8 and 4 bits run at the same
     speed). The GPU can use only part of the memory (~74% on a 16 GB Mac);
     past that, steps run 2-3x slower. On a 16 GB Mac use z-image-turbo
-    --quantize 8 (~166 s per 1024x1024 image on an M4 Mac mini) and the qwen
-    models with --quantize 4 (~96 s, 4 steps); 32 GB runs everything in bf16.
+    --quantize 8 (~155 s per 1024x1024 image on an M4 Mac mini) and the qwen
+    models with --quantize 4 (~90 s, 4 steps); 32 GB runs everything in bf16.
   - With --quantize, the first run saves the quantized weights to
     ~/.cache/mixel/weights (6 GB for z-image-turbo at 4 bits, 8.7 GB for
-    qwen) and later runs load them in about a second; --no-cache skips it.
+    qwen) and later runs load them in seconds (16 GB Mac mini: 1-5 s instead
+    of ~17 s); --no-cache skips it.
     Delete ~/.cache/mixel to free the space.
   - The text encoders run first for all images (a batch in chunks), then
     are freed before the transformer loads, so the two phases print two

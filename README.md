@@ -123,14 +123,15 @@ change. Peak memory, measured as the process footprint on the M3 Max:
 
 **What runs well where.** The GPU may only use part of a Mac's memory (its working set:
 81% on this 96 GB Mac, 74% or 11.8 GB on a 16 GB M4), and a model that needs more runs 2–3×
-slower. Measured on a [16 GB Mac mini](benchmarks/) (M4, 10-core GPU), 1024×1024:
+slower. Measured with mixel 0.5.0 on a [16 GB Mac mini](benchmarks/) (M4, 10-core GPU),
+1024×1024:
 
-| | Peak | Per image | Per step |
-|---|---:|---:|---:|
-| Z-Image-Turbo, `--quantize 8` / `4` | 8.2 / 5.4 GB | 166 s | 18.0 s |
-| Qwen-Image-2.1 in 4 steps, `--quantize 4` | 8.0 GB | 96 s | 22.6 s |
-| Qwen-Image-2.1 in 4 steps, edit, `--quantize 4` | 8.3 GB | 132 s | 25.7 s |
-| Z-Image-Turbo, bf16 (over the working set) | 13.4 GB | 182–374 s | ~40 s |
+| | Peak | Per image | Per step | Load |
+|---|---:|---:|---:|---:|
+| Z-Image-Turbo, `--quantize 8` / `4` | 8.2 / 5.4 GB | 155 / 158 s | 16.7 / 17.0 s | 5 / 1–2.4 s |
+| Qwen-Image-2.1 in 4 steps, `--quantize 4` | 8.0 GB | 90 s | 21.1 s | 4.7 s |
+| Qwen-Image-2.1 in 4 steps, edit, `--quantize 4` | 8.2 GB | 125 s | 24.3 s | 4.7 s |
+| Z-Image-Turbo, bf16 (over the working set) | 13.4 GB | 197–530 s | ~36 s | 17 s |
 
 So on 16 GB, use `--quantize 8` for Z-Image-Turbo (as fast as 4 bits there, and practically
 the bf16 images) and `--quantize 4` for Qwen-Image-2.1. An 8 GB Mac (~5.3 GB working set)
@@ -146,13 +147,17 @@ is borderline even at 4 bits; 32 GB and up runs everything in bf16.
 - **Both are slower per step**, as MLX's quantized matmuls unpack the weights as they go: in
   the [reference benchmark](benchmarks/), a 1024×1024 Z-Image-Turbo step takes 7.7 s at 8
   bits and 7.9 s at 4 against 6.3 s in bf16, and a 4-step Qwen-Image-2.1 step 10.3 s at 4
-  bits against 8.7 s (an edit 11.7 against 10.5).
+  bits against 8.7 s (an edit 11.7 against 10.5). In mixel 0.5.0, large inputs (a
+  1024×1024 image's ~4100 tokens) run as a bf16 matmul on the unpacked weights instead, 4–6%
+  slower than bf16 per matmul rather than 8–13%: on the Mac mini, quantized steps got 5–7%
+  faster than in 0.4.1, with the same images.
 - **The quantized weights are saved after the first run**, to `~/.cache/mixel/weights` (6.0
   GB for Z-Image-Turbo at 4 bits, 8.7 GB for Qwen-Image-2.1), and later runs load them
   instead of reading the full-precision files (33 GB for Z-Image-Turbo, including a 24.6 GB
   f32 transformer) and quantizing them again. On the M3 Max a warm load takes ~1 s instead
   of ~3.5 s; a Mac with less memory, which can't keep the source files in its file cache,
-  saves more (a 16 GB Mac mini spent ~17 s loading). The entries are tied to the source
+  saves more: on the 16 GB Mac mini, a load went from ~17 s to 1–2.4 s for Z-Image-Turbo at
+  4 bits (5 s at 8 bits) and to 4.7 s for Qwen-Image-2.1. The entries are tied to the source
   files and the mixel version, and a new one replaces the old; `--no-cache` skips the cache,
   and `rm -rf ~/.cache/mixel` frees the space.
 - `cargo run --release --example quantize_parity -- <model>` compares the stages and whole
