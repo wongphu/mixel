@@ -274,6 +274,7 @@ mod tests {
 
     #[test]
     fn guidance_pushes_away_from_the_negative_prediction() {
+        crate::nn::test_device();
         let pos = Array::from_slice(&[1.0f32, 2.0], &[2]);
         let neg = Array::from_slice(&[0.5f32, 3.0], &[2]);
         let at = |scale: f32| {

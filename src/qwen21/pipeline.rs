@@ -440,6 +440,7 @@ mod tests {
 
     #[test]
     fn output_is_rgb_when_opaque_and_rgba_otherwise() {
+        crate::nn::test_device();
         // 1x2 RGBA in [-1, 1]: red and blue, fully opaque.
         let px = [1.0, -1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0];
         let img = to_image(&Array::from_slice(&px, &[1, 1, 2, 4])).unwrap();
@@ -457,6 +458,7 @@ mod tests {
     // The values are exact bf16 numbers, written out in full.
     #[allow(clippy::excessive_precision)]
     fn bf16_rounding_matches_reference_timesteps() {
+        crate::nn::test_device();
         // Values recorded from the reference pipeline (8 steps, 1024 tokens).
         let s = scheduler::sigmas(8, 1024);
         let t: Vec<f32> = s[..8].iter().map(|&x| timestep(x)).collect();

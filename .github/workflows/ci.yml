@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # Apple Silicon. The tests that need the model weights (--ignored) don't
+    # run here: they download ~64 GB.
+    runs-on: macos-15
+    env:
+      CARGO_TERM_COLOR: always
+      # Inside target/, so MLX's metallib is cached with the build (by
+      # default it goes to ~/.mlx/lib/, which the cache doesn't keep).
+      MLX_RS_METAL_PATH: ${{ github.workspace }}/target/metal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Metal compiler
+        run: xcrun -f metal || xcodebuild -downloadComponent MetalToolchain
+      - name: Metal device
+        # Without one, MLX fails on the GPU; run the tests on the CPU instead.
+        run: |
+          printf 'import Metal\nprint(MTLCreateSystemDefaultDevice()?.name ?? "none")\n' > gpu.swift
+          gpu="$(swift gpu.swift 2>/dev/null || echo none)"
+          echo "Metal device: $gpu"
+          if [ "$gpu" = none ]; then echo "MIXEL_TEST_CPU=1" >> "$GITHUB_ENV"; fi
+      - run: cargo fmt --check
+      - run: cargo clippy --release --all-targets -- -D warnings
+      - run: cargo test --release
+      - name: Scripts
+        run: bash -n scripts/benchmark.sh && bash -n scripts/release.sh
