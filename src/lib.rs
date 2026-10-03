@@ -14,11 +14,13 @@
 //!
 //! [`zimage`] and [`qwen21`] hold the models themselves for lower-level use.
 
+pub mod lora;
 pub mod nn;
 mod pipeline;
 pub mod qwen21;
 pub mod zimage;
 
+pub use lora::Lora;
 pub use nn::Quantize;
 pub use pipeline::{
     composite_over_white, seeded_noise, Encoded, GenerateOptions, Generated, LoadOptions, Model,

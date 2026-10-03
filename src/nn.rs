@@ -339,7 +339,9 @@ impl Weights {
     /// Adds a low-rank update to the linear layer `prefix`: [`linear`] then
     /// returns `x W^T + b + (x down^T) up^T`, like a PEFT LoRA with its
     /// scaling folded into `up`. Kept separate rather than merged into `W`:
-    /// updates much smaller than the weights mostly round away in bf16.
+    /// updates much smaller than the weights mostly round away in bf16. A
+    /// second update to the same layer is stacked onto the first (their
+    /// ranks concatenated), so the two add up.
     pub fn add_lora(&mut self, prefix: &str, down: Array, up: Array) -> Result<()> {
         let w = self.shape(&format!("{prefix}.weight"))?;
         anyhow::ensure!(
@@ -351,6 +353,13 @@ impl Weights {
             up.shape(),
             down.shape()
         );
+        let (down, up) = match self.lora.remove(prefix) {
+            Some((d0, u0)) => (
+                mlx_rs::ops::concatenate(&[d0, down], 0)?,
+                mlx_rs::ops::concatenate(&[u0, up], 1)?,
+            ),
+            None => (down, up),
+        };
         self.lora.insert(prefix.to_string(), (down, up));
         Ok(())
     }
@@ -732,6 +741,14 @@ mod tests {
         let y = linear(&x, &w, "l").unwrap();
         y.eval().unwrap();
         assert_eq!(y.as_slice::<f32>(), &[53.0, -1.0]);
+
+        // A second update to the same layer adds to the first: 53 + 2 * 5.
+        let down = Array::from_slice(&[1.0f32, 1.0], &[1, 2]);
+        let up = Array::from_slice(&[2.0f32, 0.0], &[2, 1]);
+        w.add_lora("l", down, up).unwrap();
+        let y = linear(&x, &w, "l").unwrap();
+        y.eval().unwrap();
+        assert_eq!(y.as_slice::<f32>(), &[63.0, -1.0]);
 
         // Shapes must fit the layer.
         let bad = Array::from_slice(&[1.0f32; 3], &[1, 3]);

@@ -117,6 +117,93 @@ fn no_cache_needs_quantize() {
 }
 
 #[test]
+fn lora_is_checked_before_loading() {
+    let dir = tempfile::tempdir().unwrap();
+    let fails = |args: &[&str], expected: &str| {
+        let out = mixel(args, dir.path());
+        assert!(!out.status.success());
+        let stderr = text(&out.stderr);
+        assert!(stderr.contains(expected), "{stderr}");
+        assert!(!text(&out.stdout).contains("Loading"));
+    };
+    write_lora(&dir.path().join("l.safetensors"), 0.0);
+    fails(
+        &[
+            "--model",
+            "qwen-fast",
+            "--lora",
+            "l.safetensors",
+            "--prompt",
+            "x",
+        ],
+        "z-image-turbo only",
+    );
+    fails(
+        &["--lora", "missing.safetensors", "--prompt", "x"],
+        "missing.safetensors",
+    );
+}
+
+/// A rank-1 LoRA on Z-Image-Turbo's first attention query, every weight
+/// `value`, as a safetensors file.
+fn write_lora(path: &Path, value: f32) {
+    let layer = "diffusion_model.layers.0.attention.to_q";
+    let n = 3840;
+    let header = format!(
+        "{{\"{layer}.lora_A.weight\":{{\"dtype\":\"F32\",\"shape\":[1,{n}],\"data_offsets\":[0,{a}]}},\
+         \"{layer}.lora_B.weight\":{{\"dtype\":\"F32\",\"shape\":[{n},1],\"data_offsets\":[{a},{b}]}}}}",
+        a = n * 4,
+        b = n * 8
+    );
+    let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+    bytes.extend(header.as_bytes());
+    for _ in 0..2 * n {
+        bytes.extend(value.to_le_bytes());
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[test]
+#[ignore = "needs the ~33 GB Z-Image-Turbo weights and a GPU; run with --ignored"]
+fn lora_changes_the_image_and_a_zero_one_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    write_lora(&dir.path().join("zero.safetensors"), 0.0);
+    write_lora(&dir.path().join("some.safetensors"), 0.01);
+    let image = |name: &str, lora: Option<&str>| {
+        let mut args = vec![
+            "--quantize",
+            "4",
+            "--prompt",
+            "a red apple",
+            "--seed",
+            "5",
+            "--width",
+            "256",
+            "--height",
+            "256",
+            "--num-steps",
+            "2",
+            "--output",
+            name,
+        ];
+        if let Some(l) = lora {
+            args.extend(["--lora", l]);
+        }
+        let out = mixel(&args, dir.path());
+        assert!(
+            out.status.success(),
+            "{}\n{}",
+            text(&out.stdout),
+            text(&out.stderr)
+        );
+        std::fs::read(dir.path().join(name)).unwrap()
+    };
+    let plain = image("plain.png", None);
+    assert_eq!(image("zero.png", Some("zero.safetensors")), plain);
+    assert_ne!(image("some.png", Some("some.safetensors")), plain);
+}
+
+#[test]
 fn help_documents_batch_mode() {
     let out = mixel(&["--help"], Path::new("."));
     let stdout = text(&out.stdout);
@@ -127,6 +214,7 @@ fn help_documents_batch_mode() {
         "--overwrite",
         "--seed",
         "--quantize",
+        "--lora",
         "USAGE GUIDE",
     ] {
         assert!(stdout.contains(flag), "missing {flag}");

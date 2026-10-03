@@ -88,6 +88,12 @@ impl Transformer {
         })
     }
 
+    /// Adds a low-rank update to the linear layer `layer` (see
+    /// [`Weights::add_lora`]).
+    pub fn add_lora(&mut self, layer: &str, down: Array, up: Array) -> Result<()> {
+        self.w.add_lora(layer, down, up)
+    }
+
     /// Predicts the flow velocity.
     ///
     /// * `x` - latents (B, 16, H, W) in the model dtype

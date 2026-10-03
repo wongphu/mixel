@@ -1,5 +1,6 @@
 //! The end-to-end text-to-image pipeline.
 
+use crate::lora::Lora;
 use crate::nn::{ModelFiles, Quantize, WeightCache};
 use crate::qwen21::pipeline::QwenPipeline;
 use crate::zimage::pipeline::ZImagePipeline;
@@ -157,6 +158,9 @@ pub struct LoadOptions {
     /// GB of files, 6 GB at 4 bits). Off by default: the library writes no
     /// files unless asked. [`Pipeline::notes`] says what it saved.
     pub weight_cache: Option<PathBuf>,
+    /// LoRA files to add to Z-Image-Turbo's transformer (the Qwen models
+    /// don't take LoRAs yet).
+    pub loras: Vec<Lora>,
 }
 
 /// What to generate.
@@ -407,6 +411,12 @@ impl Pipeline {
             mlx_rs::Device::set_default(&mlx_rs::Device::cpu());
         }
         mlx_rs::memory::set_cache_limit(0)?;
+        anyhow::ensure!(
+            opts.loras.is_empty() || opts.model == Model::ZImageTurbo,
+            "{} doesn't take LoRAs yet (only {} does)",
+            opts.model,
+            Model::ZImageTurbo
+        );
         let repo = opts.repo.as_deref().unwrap_or(opts.model.repo());
         let files = ModelFiles::new(repo, opts.model_path.as_deref())?;
         let cache = opts.weight_cache.as_ref().map(WeightCache::new);
@@ -417,6 +427,7 @@ impl Pipeline {
                 opts.quantize,
                 opts.parts,
                 cache,
+                &opts.loras,
             )?)),
             Model::QwenImage21 => Inner::Qwen(Box::new(QwenPipeline::load(
                 &files,

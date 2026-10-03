@@ -11,7 +11,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use image::ImageDecoder;
-use mixel::{Encoded, GenerateOptions, LoadOptions, Model, Parts, Pipeline, Progress, Quantize};
+use mixel::{
+    Encoded, GenerateOptions, LoadOptions, Lora, Model, Parts, Pipeline, Progress, Quantize,
+};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -90,6 +92,8 @@ Recipes:
           --prompt \"make it night\" --seed 1 --output night.png
   Variation of an image (img2img; lower --strength = closer to it):
     mixel --init-image in.png --strength 0.7 --prompt \"...\" --seed 1 --output v.png
+  Add a LoRA trained for z-image-turbo (repeatable; FILE[:SCALE]):
+    mixel --lora style.safetensors:0.8 --prompt \"<its trigger> ...\" --seed 1 --output s.png
   Many images (loads the model once; much faster than a loop):
     mixel --input jobs.jsonl --output-dir out --seed 1
 
@@ -244,6 +248,12 @@ struct Args {
     /// ~/.cache/mixel/weights.
     #[arg(long, requires = "quantize")]
     no_cache: bool,
+
+    /// Add a LoRA (z-image-turbo only): a .safetensors file, with an optional
+    /// strength, e.g. --lora style.safetensors:0.8 [default: 1]. Repeat for
+    /// several; their effects add up. Applies to every image of a batch.
+    #[arg(long = "lora", value_name = "FILE[:SCALE]")]
+    loras: Vec<String>,
 
     /// Override path to the model weights directory (uses HuggingFace by default).
     #[arg(long)]
@@ -731,6 +741,28 @@ fn read_jobs(path: &Path, args: &Args) -> Result<Vec<Job>> {
 }
 
 fn run(args: Args) -> Result<()> {
+    // LoRAs: parsed and checked (from their headers) before anything loads.
+    let loras = args
+        .loras
+        .iter()
+        .map(|s| Lora::parse(s))
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        loras.is_empty() || args.model() == Model::ZImageTurbo,
+        "--lora works with z-image-turbo only, not {}",
+        args.model()
+    );
+    let mut lora_lines = Vec::new();
+    for lora in &loras {
+        let layers = lora.layers()?;
+        lora_lines.push(format!(
+            "LoRA: {} (scale {}, {} layers)",
+            lora.path.display(),
+            lora.scale,
+            layers.len()
+        ));
+    }
+
     let jobs = match &args.input {
         Some(path) => read_jobs(path, &args)?,
         None => {
@@ -760,6 +792,9 @@ fn run(args: Args) -> Result<()> {
 
     let model = args.model();
     println!("mixel: {model}");
+    for line in &lora_lines {
+        println!("{line}");
+    }
     if let Some(path) = &args.input {
         println!(
             "Input: {} ({} to generate, {} skipped)",
@@ -790,6 +825,11 @@ fn run(args: Args) -> Result<()> {
             quantize: args.quantize.map(QuantizeArg::quantize),
             parts,
             weight_cache: weight_cache.clone(),
+            loras: if parts == Parts::Encoders {
+                Vec::new()
+            } else {
+                loras.clone()
+            },
         })?;
         for note in pipeline.notes() {
             println!("Cache: {note}");

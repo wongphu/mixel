@@ -4,6 +4,7 @@ use super::{
     scalar, scheduler::Scheduler, text_encoder::TextEncoder, transformer::Transformer, vae::Vae,
     ModelFiles, Quantize, WeightCache,
 };
+use crate::lora::Lora;
 use crate::pipeline::{
     resize_to_fill, seeded_noise, to_rgb_image, GenerateOptions, Generated, Parts, Progress,
     Timings,
@@ -47,12 +48,14 @@ impl ZImagePipeline {
     /// Loads the tokenizer and the given `parts`: the text encoder, and the
     /// transformer and VAE, with the text encoder and transformer quantized
     /// if `quantize` is set.
-    /// Quantized weights go through `cache` when given.
+    /// Quantized weights go through `cache` when given; `loras` are added to
+    /// the transformer.
     pub fn load(
         files: &ModelFiles,
         quantize: Option<Quantize>,
         parts: Parts,
         cache: Option<&WeightCache>,
+        loras: &[Lora],
     ) -> Result<Self> {
         let dtype = Dtype::Bfloat16;
 
@@ -74,7 +77,20 @@ impl ZImagePipeline {
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let transformer = Transformer::load(&tr_files, dtype, quantize, cache)?;
+            let mut transformer = Transformer::load(&tr_files, dtype, quantize, cache)?;
+            for lora in loras {
+                for u in lora.updates(dtype)? {
+                    transformer
+                        .add_lora(&u.layer, u.down, u.up)
+                        .with_context(|| {
+                            format!(
+                                "{}: can't apply its update to layer {}",
+                                lora.path.display(),
+                                u.layer
+                            )
+                        })?;
+                }
+            }
             let vae = Vae::load(files.get("vae/diffusion_pytorch_model.safetensors")?, dtype)?;
             (Some(transformer), Some(vae))
         } else {
