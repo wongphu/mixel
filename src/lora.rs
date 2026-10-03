@@ -12,7 +12,7 @@
 
 use anyhow::{Context, Result};
 use mlx_rs::{Array, Dtype};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 /// A LoRA file and how strongly to apply it (1.0: as trained).
@@ -71,15 +71,21 @@ impl Lora {
     }
 
     fn names(&self) -> Result<BTreeMap<String, Names>> {
-        let tensors = Array::load_safetensors(&self.path)
-            .with_context(|| format!("reading LoRA {}", self.path.display()))?;
+        let tensors = self.tensors()?;
         group(tensors.keys().map(String::as_str), &self.path)
+    }
+
+    /// The file's tensors (read lazily). MLX's own error for a missing file
+    /// doesn't name it, so check first.
+    fn tensors(&self) -> Result<HashMap<String, Array>> {
+        let path = self.path.display();
+        anyhow::ensure!(self.path.is_file(), "LoRA file {path} not found");
+        Array::load_safetensors(&self.path).with_context(|| format!("reading LoRA {path}"))
     }
 
     /// Reads the updates in `dtype`.
     pub(crate) fn updates(&self, dtype: Dtype) -> Result<Vec<Update>> {
-        let mut tensors = Array::load_safetensors(&self.path)
-            .with_context(|| format!("reading LoRA {}", self.path.display()))?;
+        let mut tensors = self.tensors()?;
         let names = group(tensors.keys().map(String::as_str), &self.path)?;
         let mut take = |name: &Option<String>| -> Result<Array> {
             let name = name.as_ref().expect("checked by group");
@@ -292,6 +298,13 @@ mod tests {
             &[("img_in.lora_down", t()), ("img_in.lora_up", t())]
         )
         .contains("qwen-image-2.1-fast"));
+    }
+
+    #[test]
+    fn names_a_missing_file() {
+        let lora = Lora::parse("no/such/style.safetensors:0.5").unwrap();
+        let err = lora.layers().unwrap_err().to_string();
+        assert_eq!(err, "LoRA file no/such/style.safetensors not found");
     }
 
     #[test]
