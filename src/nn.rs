@@ -474,11 +474,27 @@ pub fn scalar(v: f32, dtype: Dtype) -> Result<Array> {
     Ok(Array::from_f32(v).as_dtype(dtype)?)
 }
 
+/// From this many rows of input, [`linear`] runs a quantized layer as a bf16
+/// matmul on its unpacked weight; the two cross over at ~2048 rows (M3 Max).
+const DEQUANTIZE_ROWS: i32 = 3072;
+
+/// Rows of `x`: all but its last axis.
+fn rows(x: &Array) -> i32 {
+    x.shape()[..x.ndim() - 1].iter().product()
+}
+
 /// `x @ W^T (+ b)` for PyTorch-style `prefix.weight` / optional `prefix.bias`,
 /// plus the layer's low-rank update if it has one ([`Weights::add_lora`]).
 /// Quantized layers ([`Weights::load_quantized`]) run as quantized matmuls.
 pub fn linear(x: &Array, w: &Weights, prefix: &str) -> Result<Array> {
     let mut y = match w.quantized.get(prefix) {
+        // Many rows (a 1024x1024 image's ~4100 tokens): unpacking the weight to
+        // bf16 for a plain matmul is 4-6% faster than MLX's quantized matmul.
+        // Few rows (prompts): the quantized matmul, up to 4x faster.
+        Some(q) if rows(x) >= DEQUANTIZE_ROWS => {
+            let w = mlx_rs::ops::dequantize(&q.w, &q.scales, &q.biases, GROUP_SIZE, q.bits)?;
+            x.matmul(w.t())?
+        }
         Some(q) => {
             mlx_rs::ops::quantized_matmul(x, &q.w, &q.scales, &q.biases, true, GROUP_SIZE, q.bits)?
         }
@@ -868,5 +884,32 @@ mod tests {
             "{notes:?}"
         );
         assert_eq!(rel_err(&rebuilt, &doubled), 0.0);
+    }
+
+    #[test]
+    fn large_inputs_unpack_quantized_weights_to_the_same_result() {
+        let key = mlx_rs::random::key(3).unwrap();
+        let weight = mlx_rs::random::normal::<f32>(&[64, 128][..], None, None, &key).unwrap();
+        let (wq, scales, biases) = mlx_rs::ops::quantize(&weight, GROUP_SIZE, 4).unwrap();
+        let w = Weights {
+            map: HashMap::new(),
+            quantized: HashMap::from([(
+                "l".to_string(),
+                QuantizedWeight {
+                    w: wq.clone(),
+                    scales: scales.clone(),
+                    biases: biases.clone(),
+                    bits: 4,
+                    shape: vec![64, 128],
+                },
+            )]),
+            lora: HashMap::new(),
+        };
+        let x = mlx_rs::random::normal::<f32>(&[1, DEQUANTIZE_ROWS, 128][..], None, None, &key)
+            .unwrap();
+        let unpacked = linear(&x, &w, "l").unwrap();
+        let kernel =
+            mlx_rs::ops::quantized_matmul(&x, &wq, &scales, &biases, true, GROUP_SIZE, 4).unwrap();
+        assert!(rel_err(&unpacked, &kernel) < 1e-5);
     }
 }
