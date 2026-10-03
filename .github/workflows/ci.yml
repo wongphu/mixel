@@ -12,15 +12,22 @@ jobs:
     runs-on: macos-15
     env:
       CARGO_TERM_COLOR: always
-      # Inside target/, so MLX's metallib is cached with the build (by
-      # default it goes to ~/.mlx/lib/, which the cache doesn't keep).
-      MLX_RS_METAL_PATH: ${{ github.workspace }}/target/metal
+      # MLX's metallib, cached on its own: by default it goes to ~/.mlx/lib/,
+      # and rust-cache prunes anything else it finds in target/.
+      MLX_RS_METAL_PATH: ${{ github.workspace }}/.mlx-metal
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: .mlx-metal
+          key: mlx-metallib-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: MLX metallib
+        # A cached build without its metallib can't run MLX: rebuild mlx-sys.
+        run: test -f "$MLX_RS_METAL_PATH/mlx.metallib" || cargo clean --release -p mlx-sys
       - name: Metal compiler
         run: xcrun -f metal || xcodebuild -downloadComponent MetalToolchain
       - name: Metal device
