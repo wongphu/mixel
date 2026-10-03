@@ -417,7 +417,21 @@ MIT, see [LICENSE](LICENSE). The Z-Image code is ported from candle-transformers
 (MIT/Apache-2.0). The Qwen-Image-2.1 code is ported from diffusers and transformers
 (Apache-2.0, see [LICENSE-APACHE](LICENSE-APACHE)).
 
-The model weights have their own licenses, which you accept when downloading them.
-In particular, **Qwen-Image-2.1's weights, and the 4-step adapter's, are under the Qwen
-Research License: research and evaluation only, not commercial use** without a separate
-license from Qwen.
+The model weights have their own licenses, which you accept when downloading them:
+
+| `--model` | Weights license | Commercial use |
+|---|---|---|
+| `z-image-turbo` | [Apache-2.0](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | yes |
+| `qwen-image-2.1` | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE) | **no**, research and evaluation only |
+| `qwen-image-2.1-fast` | the same, for the base weights and the [4-step adapter](https://huggingface.co/alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs/blob/main/LICENSE) | **no**, research and evaluation only |
+
+**Images.** The generated images aren't covered by the Qwen license and are yours
+([Qwen's clarification](https://x.com/Alibaba_Qwen/status/2101897967703925145)), but making
+them for a commercial purpose is a commercial use of the model, which the license forbids
+without a separate license from Qwen (model-business@notice.qwencloud.com). Images from
+Z-Image-Turbo can be used for any purpose. Either way, you are responsible for not
+infringing others' rights (characters, trademarks, likenesses, reference images), and
+AI-generated images may not be protected by copyright.
+
+If you use Qwen-Image-2.1's outputs to train or fine-tune a model that you distribute, the
+Qwen license also requires you to say "Built with Qwen" in its documentation.
