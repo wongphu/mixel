@@ -1,6 +1,6 @@
 #!/bin/bash
 # Benchmarks mixel on this Mac and writes a shareable report,
-# mixel-benchmark-<chip>-<gpu>-<memory>-<date>.md, labelled with the hardware.
+# mixel-benchmark-<chip>-<gpu>-<memory>-<version>-<date>.md, labelled with the hardware.
 #
 #   scripts/benchmark.sh              # run everything that fits in memory
 #   scripts/benchmark.sh --dry-run    # only show the plan
@@ -79,6 +79,10 @@ while [ $# -gt 0 ]; do
 done
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -n "$MIXEL" ] && ! [ -x "$MIXEL" ]; then
+  echo "error: --mixel $MIXEL: no such program (give the full path to the mixel binary)" >&2
+  exit 2
+fi
 num() { awk "BEGIN { printf \"%.1f\", $1 }"; }
 
 # ---------- hardware (nothing that identifies the machine or its owner) ----------
@@ -88,8 +92,8 @@ MODEL_NAME="$(system_profiler SPHardwareDataType 2>/dev/null | awk -F': ' '/Mode
 MEM_BYTES="$(sysctl -n hw.memsize)"
 MEM_GB="$(awk "BEGIN { printf \"%d\", $MEM_BYTES / $GIB }")"
 # The GPU may only use part of that (Metal's recommendedMaxWorkingSetSize: 81%
-# on a 96 GB Mac, about 2/3 on a 16 GB one), and a test that needs more runs
-# 2-3x slower (on a 16 GB M4, Z-Image-Turbo in bf16 at 13.4 GB). Ask Metal,
+# on a 96 GB Mac, 74% or 11.8 GB on a 16 GB M4), and a test that needs more
+# runs 2-3x slower (on that M4, Z-Image-Turbo in bf16 at 13.4 GB). Ask Metal,
 # through Swift from Xcode's command line tools, else assume 2/3.
 GPU_WS_GB=""
 if command -v swift >/dev/null; then
@@ -180,6 +184,10 @@ if [ -z "$MIXEL" ]; then
   MIXEL="$REPO_DIR/target/release/mixel"
 fi
 MIXEL_VERSION="$("$MIXEL" --version 2>/dev/null)"
+if [ -z "$MIXEL_VERSION" ]; then
+  echo "error: $MIXEL doesn't run (mixel --version failed)" >&2
+  exit 1
+fi
 GIT_REV="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if [ -n "$(git -C "$REPO_DIR" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
   GIT_REV="$GIT_REV (modified)"
@@ -289,7 +297,13 @@ MINUTES="$(num "($(date +%s) - $START_S) / 60")"
 
 # ---------- the report ----------
 SAFE_LABEL="$(echo "$CHIP-${GPU_CORES:-x}gpu-${MEM_GB}GB" | tr ' ' '-')"
-REPORT="$OUT/mixel-benchmark-$SAFE_LABEL-$(date +%Y-%m-%d).md"
+# Named after the Mac, the mixel version and the day; never replaces a report.
+REPORT="$OUT/mixel-benchmark-$SAFE_LABEL-${MIXEL_VERSION#mixel }-$(date +%Y-%m-%d).md"
+n=2
+while [ -e "$REPORT" ]; do
+  REPORT="$OUT/mixel-benchmark-$SAFE_LABEL-${MIXEL_VERSION#mixel }-$(date +%Y-%m-%d)-$n.md"
+  n=$((n + 1))
+done
 {
   echo "# mixel benchmark: $HW_LABEL"
   echo

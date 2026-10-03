@@ -149,7 +149,7 @@ Running it:
     practically the same images; --quantize 4 (~5.4 GB, ~7.5-9 GB) gives
     images as good but not the same ones for a seed. Both are ~10-25%
     slower per step on an M3 Max (on an M4, 8 and 4 bits run at the same
-    speed). The GPU can use only part of the memory (~2/3 on a 16 GB Mac);
+    speed). The GPU can use only part of the memory (~74% on a 16 GB Mac);
     past that, steps run 2-3x slower. On a 16 GB Mac use z-image-turbo
     --quantize 8 (~166 s per 1024x1024 image on an M4 Mac mini) and the qwen
     models with --quantize 4 (~96 s, 4 steps); 32 GB runs everything in bf16.

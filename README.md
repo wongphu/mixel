@@ -122,7 +122,7 @@ change. Peak memory, measured as the process footprint on the M3 Max:
 | Qwen-Image-2.1, edit with a ~1024×1024 image | 18.3 GB | 12.2 GB | **9.0 GB** |
 
 **What runs well where.** The GPU may only use part of a Mac's memory (its working set:
-81% on this 96 GB Mac, about 2/3 on a 16 GB one), and a model that needs more runs 2–3×
+81% on this 96 GB Mac, 74% or 11.8 GB on a 16 GB M4), and a model that needs more runs 2–3×
 slower. Measured on a [16 GB Mac mini](benchmarks/) (M4, 10-core GPU), 1024×1024:
 
 | | Peak | Per image | Per step |
@@ -269,9 +269,10 @@ scripts/benchmark.sh             # run it: ~65 min on an M3 Max
 It runs each test that fits in your GPU's working set: Z-Image-Turbo at 512×512 and
 1024×1024 (also in 8 and 4 bits), and Qwen-Image-2.1 in 4 and 40 steps, text-to-image and an
 edit (the 4-step ones also in 4 bits). A 16 GB Mac runs the quantized tests, a 32 GB one
-all of them. It asks before downloading weights. The result is one file, `mixel-benchmark-<chip>-<gpu>-<memory>-<date>.md`, labelled with
-your Mac, chip, CPU and GPU cores, memory, macOS version and power source, with a table to
-read and a JSON block for us to compile.
+all of them. It asks before downloading weights. The result is one file,
+`mixel-benchmark-<chip>-<gpu>-<memory>-<version>-<date>.md`, labelled with your Mac, chip,
+CPU and GPU cores, memory, macOS version and power source, with a table to read and a JSON
+block for us to compile.
 
 **Please email it to [mixelate@proton.me](mailto:mixelate@proton.me).** It holds only the
 hardware summary and the timings: no serial numbers, hostnames, user names or images. For
