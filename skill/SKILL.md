@@ -9,7 +9,7 @@ mixel is a command-line image generator the user wrote (`~/code/mixel`, installe
 
 **mixel is under active development, and this skill can lag behind it.** The version number doesn't always change when the CLI does. The authoritative reference is `mixel --help` (it ends with a USAGE GUIDE written for agents) and `~/code/mixel/README.md`. If you have a shell on the user's Mac, run `mixel --help` before relying on anything below; if it disagrees with this skill, follow `--help` and tell the user which part of the skill is stale.
 
-This version was written from mixel 0.5.0 (commit `bb7c156`, 2026-10-03). `mixel --version` tells you what's installed; builds before 0.5.0 lack some of what follows (`--quantize` came in 0.4.0, `--lora` and the weight cache in 0.5.0).
+This version was written from mixel 0.5.0 (commit `bb7c156`, 2026-10-03). `mixel --version` tells you what's installed; builds before 0.5.0 lack some of what follows (`--quantize` came in 0.4.0, `--lora` for Z-Image-Turbo and the weight cache in 0.5.0, `--lora` for the Qwen models after 0.5.0).
 
 ## Models
 
@@ -51,13 +51,14 @@ Peak memory at 1024×1024, by setting:
 - The first `--quantize` run saves the quantized weights to `~/.cache/mixel/weights` (6 GB for z-image-turbo at 4 bits, 8.7 GB for the Qwen models; more at 8 bits), printing `Cache: saved …`, and is slower. Later runs load them in seconds (on a 16 GB Mac mini 1–5 s instead of ~17 s). Tell the user about the disk space; `rm -rf ~/.cache/mixel` frees it, `--no-cache` skips it.
 - `--quantize` is per run, like `--model`: not a JSONL field.
 
-## LoRAs (z-image-turbo only)
+## LoRAs
 
-`--lora FILE[:SCALE]` adds a LoRA trained for Z-Image-Turbo (a `.safetensors` file, e.g. from Hugging Face), at its trained strength by default; `:0.7` weakens it, and `--lora` can repeat (effects add up). It works with `--quantize` too.
+`--lora FILE[:SCALE]` adds a LoRA trained for the model: Z-Image-Turbo, or Qwen-Image-2.1 for both Qwen variants (a `.safetensors` file, e.g. from Hugging Face). It applies at its trained strength by default; `:0.7` weakens it, and `--lora` can repeat (effects add up). It works with `--quantize` too.
 
 - It applies to every image of the run (not a JSONL field): images that need different LoRAs go in separate runs.
 - Most LoRAs need their trigger phrase from the model card in the prompt (e.g. "Pixel art style."); without it the effect is often small.
-- The file is checked before the model loads: text-encoder LoRAs, DoRA and kohya's `lora_unet_…` names are rejected with the reason, and the Qwen models refuse `--lora`.
+- The file is checked before the model loads: text-encoder LoRAs, DoRA and kohya's `lora_unet_…` names are rejected with the reason.
+- Qwen-Image-2.1 LoRAs made for the 40-step model also work with `qwen-image-2.1-fast` (edit LoRAs such as doodle-in, which turns a magenta scribble into a named object, or Natural-Exposure). Don't pass the 4-step adapter itself as `--lora` (mixel says to use `qwen-image-2.1-fast`), and treat speed-up LoRAs for other step counts (Turbo8, Viggle) as untested.
 - Check the LoRA's license on its model card before commercial use.
 
 ## JSONL format

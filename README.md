@@ -6,7 +6,7 @@ them also in a 4-step variant:
 
 | `--model` | Model | Default steps | 1024×1024 image | Can do |
 |---|---|---:|---:|---|
-| `z-image-turbo` (default) | [Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | 9 | ~59 s | text-to-image, img2img, [LoRAs](#loras-z-image-turbo) |
+| `z-image-turbo` (default) | [Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | 9 | ~59 s | text-to-image, img2img, [LoRAs](#loras) |
 | `qwen-image-2.1` | [Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1) | 40 | ~6 min | text-to-image, img2img, **editing with reference images** |
 | `qwen-image-2.1-fast` | Qwen-Image-2.1 + [4-step Fun-Acc LoRA](https://huggingface.co/alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs) | 4 (fixed) | ~38 s | the same, slightly softer fine detail |
 
@@ -177,28 +177,40 @@ Z-Image-Turbo image peaked at 36 GB in mixel 0.3, and a Qwen-Image-2.1 edit at 6
   their input (~4.5 GB for one 3×3 convolution at 1024×1024). Decoding takes ~1 s longer.
 - MLX's buffer cache is off: it kept up to 10 GB of freed buffers.
 
-## LoRAs (Z-Image-Turbo)
+## LoRAs
 
 ```bash
 mixel --lora pixel_art.safetensors --prompt "Pixel art style. A red fox sitting in fresh snow"
 mixel --quantize 4 --lora style.safetensors:0.7 --lora detail.safetensors:0.5 --prompt "..."
+mixel --model qwen-fast --lora doodle_in_lora_qwen21.safetensors --ref-image scribbled.png \
+      --prompt "<doodle> Turn the magenta scribble into a black top hat."
 ```
 
-- `--lora FILE[:SCALE]` adds a LoRA trained for Z-Image-Turbo to its transformer, at its
-  trained strength by default (1). Repeat it for several; their effects add up. It applies
-  to every image of a run, in bf16 or quantized: the low-rank updates run next to the
-  weights instead of being merged into them, where bf16 would round much of them away and
-  4-bit weights couldn't take them at all.
-- It reads the two layouts Z-Image-Turbo LoRAs come in, under a `diffusion_model.` or
-  `transformer.` prefix: `lora_A`/`lora_B` (ai-toolkit, PEFT/diffusers) and
-  `lora_down`/`lora_up` with an `alpha` (kohya, ComfyUI). Text-encoder LoRAs, DoRA and
-  kohya's `lora_unet_...` names aren't supported. The files are checked before the model
-  loads.
+- `--lora FILE[:SCALE]` adds a LoRA trained for the model (Z-Image-Turbo, or
+  Qwen-Image-2.1 for both Qwen variants) to its transformer, at its trained strength by
+  default (1). Repeat it for several; their effects add up. It applies to every image of a
+  run, in bf16 or quantized: the low-rank updates run next to the weights instead of being
+  merged into them, where bf16 would round much of them away and 4-bit weights couldn't
+  take them at all.
+- It reads the layouts these LoRAs come in on Hugging Face, under `diffusion_model.` and/or
+  `transformer.` prefixes: `lora_A`/`lora_B` (ai-toolkit, PEFT/diffusers, also
+  `.default`) and `lora_down`/`lora_up` (kohya, ComfyUI), with or without an `alpha`.
+  Qwen-Image-2.1 LoRAs trained in ComfyUI's layout address each block's fused
+  `img_mlp.gate_up`; mixel splits those onto its separate `gate_layer` and `proj` (gate
+  first, as ComfyUI's loader does), and gives the same image, bit for bit, as the
+  [doodle-in](https://huggingface.co/ML-Intern-lab/Qwen-Image-2.1-doodle-in-LoRA) LoRA's
+  author-split version. Text-encoder LoRAs, DoRA and kohya's `lora_unet_...` names aren't
+  supported. The files are checked before the model loads.
 - Most LoRAs respond to a trigger phrase from their model card, such as "Pixel art style."
   for [this one](https://huggingface.co/tarn59/pixel_art_style_lora_z_image_turbo). At
   scale 0 the image is the same, bit for bit, as without the LoRA.
-- The Qwen models don't take LoRAs yet. In the library: `LoadOptions::loras`, a
-  `Vec<mixel::Lora>`.
+- Qwen-Image-2.1 LoRAs trained on the 40-step model also work with `qwen-image-2.1-fast`,
+  on top of its 4-step adapter (tested with doodle-in and
+  [Natural-Exposure](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-Natural-Exposure-LoRA)).
+  The 4-step adapter itself isn't a `--lora`: mixel says to use `qwen-image-2.1-fast`.
+  Speed-up LoRAs for other step counts (Turbo8, Viggle's 4–8-step ones) expect their own
+  step schedules, which mixel doesn't have; they're untested here.
+- In the library: `LoadOptions::loras`, a `Vec<mixel::Lora>`.
 
 ## As a library
 

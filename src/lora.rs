@@ -1,12 +1,14 @@
 //! LoRA files: low-rank updates to a model's linear layers, applied on top of
 //! its weights (quantized or not) rather than merged into them.
 //!
-//! Reads the two layouts Z-Image-Turbo LoRAs come in, under a
-//! `diffusion_model.` or `transformer.` prefix or none:
-//! `<layer>.lora_A.weight` / `.lora_B.weight` (PEFT, ai-toolkit), and
-//! `<layer>.lora_down.weight` / `.lora_up.weight` with an optional `.alpha`
-//! (kohya, ComfyUI). The update is `scale * alpha / rank * up @ down`, alpha
-//! defaulting to the rank.
+//! Reads the layouts Z-Image-Turbo and Qwen-Image-2.1 LoRAs come in, under
+//! `diffusion_model.` and/or `transformer.` prefixes or none:
+//! `<layer>.lora_A.weight` / `.lora_B.weight` (PEFT, ai-toolkit, diffusers;
+//! also `.lora_A.default.weight`), and `<layer>.lora_down.weight` /
+//! `.lora_up.weight` (kohya, ComfyUI), each with an optional `.alpha`. The
+//! update is `scale * alpha / rank * up @ down`, alpha defaulting to the
+//! rank. Layer names are the files'; the model maps them onto its own (see
+//! `qwen21::transformer::Transformer::add_lora`).
 
 use anyhow::{Context, Result};
 use mlx_rs::{Array, Dtype};
@@ -126,10 +128,16 @@ fn group<'a>(names: impl Iterator<Item = &'a str>, path: &Path) -> Result<BTreeM
     let mut layers: BTreeMap<String, Names> = BTreeMap::new();
     let mut unknown = Vec::new();
     for full in names {
-        let name = PREFIXES
-            .iter()
-            .find_map(|p| full.strip_prefix(p))
-            .unwrap_or(full);
+        // Prefixes can stack (`diffusion_model.transformer.`).
+        let mut name = full;
+        while let Some(rest) = PREFIXES.iter().find_map(|p| name.strip_prefix(p)) {
+            name = rest;
+        }
+        anyhow::ensure!(
+            !(name.ends_with(".lora_down") || name.ends_with(".lora_up")),
+            "{file}: this looks like the Qwen-Image-2.1 4-step adapter (Fun-Acc); \
+             use --model qwen-image-2.1-fast, which applies it, instead of --lora ({full})"
+        );
         anyhow::ensure!(
             !(name.starts_with("lora_te") || name.starts_with("text_encoder")),
             "{file}: text-encoder LoRAs aren't supported ({full})"
@@ -279,5 +287,28 @@ mod tests {
             &[("lora_unet_layers_0_x.lora_down.weight", t())]
         )
         .contains("lora_unet_"));
+        assert!(err(
+            "funacc.safetensors",
+            &[("img_in.lora_down", t()), ("img_in.lora_up", t())]
+        )
+        .contains("qwen-image-2.1-fast"));
+    }
+
+    #[test]
+    fn strips_stacked_prefixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = || Array::from_slice(&[0.0f32; 4], &[2, 2]);
+        let name = "diffusion_model.transformer.transformer_blocks.0.attn.to_q";
+        let (a, b) = (
+            format!("{name}.lora_A.weight"),
+            format!("{name}.lora_B.weight"),
+        );
+        let path = write(
+            dir.path(),
+            "stacked.safetensors",
+            &[(a.as_str(), t()), (b.as_str(), t())],
+        );
+        let lora = Lora { path, scale: 1.0 };
+        assert_eq!(lora.layers().unwrap(), ["transformer_blocks.0.attn.to_q"]);
     }
 }

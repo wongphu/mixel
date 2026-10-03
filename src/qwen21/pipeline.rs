@@ -8,12 +8,13 @@ use super::transformer::{Segment, Transformer, TOKENS_PER_SLOT};
 use super::vae::Vae;
 use super::vision::VisionEncoder;
 use super::{scheduler, OUTPUT_RESOLUTION, VAE_SCALE};
+use crate::lora::Lora;
 use crate::nn::{ModelFiles, Quantize, WeightCache};
 use crate::pipeline::{
     composite_over_white, resize_to_fill, seeded_noise, GenerateOptions, Generated, Parts,
     Progress, Timings,
 };
-use anyhow::{Error as E, Result};
+use anyhow::{Context, Error as E, Result};
 use mlx_rs::{Array, Dtype};
 use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
@@ -71,13 +72,15 @@ impl QwenPipeline {
     /// Loads the tokenizer and the given `parts`: the text and vision
     /// encoders, and the transformer (with the 4-step adapter applied if
     /// given) and VAE, with the text encoder and transformer quantized if
-    /// `quantize` is set (through `cache` when given).
+    /// `quantize` is set (through `cache` when given), and `loras` added to
+    /// the transformer after the adapter.
     pub fn load(
         files: &ModelFiles,
         adapter: Option<&ModelFiles>,
         quantize: Option<Quantize>,
         parts: Parts,
         cache: Option<&WeightCache>,
+        loras: &[Lora],
     ) -> Result<Self> {
         let dtype = Dtype::Bfloat16;
         let tokenizer =
@@ -117,6 +120,19 @@ impl QwenPipeline {
                 }
                 None => None,
             };
+            for lora in loras {
+                for u in lora.updates(dtype)? {
+                    transformer
+                        .add_lora(&u.layer, u.down, u.up)
+                        .with_context(|| {
+                            format!(
+                                "{}: can't apply its update to layer {}",
+                                lora.path.display(),
+                                u.layer
+                            )
+                        })?;
+                }
+            }
             let vae = Vae::load(files.get("vae/diffusion_pytorch_model.safetensors")?, dtype)?;
             (Some(transformer), Some(vae), fast_sigmas)
         } else {

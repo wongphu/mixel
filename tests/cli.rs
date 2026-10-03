@@ -126,17 +126,25 @@ fn lora_is_checked_before_loading() {
         assert!(stderr.contains(expected), "{stderr}");
         assert!(!text(&out.stdout).contains("Loading"));
     };
-    write_lora(&dir.path().join("l.safetensors"), 0.0);
+    // Qwen-Image-2.1's 4-step adapter is a model, not a --lora.
+    write_safetensors(
+        &dir.path().join("funacc.safetensors"),
+        &[
+            ("img_in.lora_down", &[1, 64]),
+            ("img_in.lora_up", &[4096, 1]),
+        ],
+        0.0,
+    );
     fails(
         &[
             "--model",
-            "qwen-fast",
+            "qwen",
             "--lora",
-            "l.safetensors",
+            "funacc.safetensors",
             "--prompt",
             "x",
         ],
-        "z-image-turbo only",
+        "qwen-image-2.1-fast",
     );
     fails(
         &["--lora", "missing.safetensors", "--prompt", "x"],
@@ -144,23 +152,46 @@ fn lora_is_checked_before_loading() {
     );
 }
 
-/// A rank-1 LoRA on Z-Image-Turbo's first attention query, every weight
-/// `value`, as a safetensors file.
-fn write_lora(path: &Path, value: f32) {
-    let layer = "diffusion_model.layers.0.attention.to_q";
-    let n = 3840;
-    let header = format!(
-        "{{\"{layer}.lora_A.weight\":{{\"dtype\":\"F32\",\"shape\":[1,{n}],\"data_offsets\":[0,{a}]}},\
-         \"{layer}.lora_B.weight\":{{\"dtype\":\"F32\",\"shape\":[{n},1],\"data_offsets\":[{a},{b}]}}}}",
-        a = n * 4,
-        b = n * 8
-    );
+/// A safetensors file of f32 tensors, every value `value`.
+fn write_safetensors(path: &Path, tensors: &[(&str, &[usize])], value: f32) {
+    let (mut entries, mut offset) = (Vec::new(), 0);
+    for (name, shape) in tensors {
+        let bytes = shape.iter().product::<usize>() * 4;
+        let shape: Vec<String> = shape.iter().map(|d| d.to_string()).collect();
+        entries.push(format!(
+            "\"{name}\":{{\"dtype\":\"F32\",\"shape\":[{}],\"data_offsets\":[{offset},{}]}}",
+            shape.join(","),
+            offset + bytes
+        ));
+        offset += bytes;
+    }
+    let header = format!("{{{}}}", entries.join(","));
     let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
     bytes.extend(header.as_bytes());
-    for _ in 0..2 * n {
+    for _ in 0..offset / 4 {
         bytes.extend(value.to_le_bytes());
     }
     std::fs::write(path, bytes).unwrap();
+}
+
+/// A rank-1 LoRA on `layer` (in x out), every weight `value`.
+fn write_lora_on(path: &Path, layer: &str, n_in: usize, n_out: usize, value: f32) {
+    let (a, b) = (
+        format!("{layer}.lora_A.weight"),
+        format!("{layer}.lora_B.weight"),
+    );
+    write_safetensors(path, &[(&a, &[1, n_in]), (&b, &[n_out, 1])], value);
+}
+
+/// A rank-1 LoRA on Z-Image-Turbo's first attention query.
+fn write_lora(path: &Path, value: f32) {
+    write_lora_on(
+        path,
+        "diffusion_model.layers.0.attention.to_q",
+        3840,
+        3840,
+        value,
+    );
 }
 
 #[test]
@@ -183,6 +214,53 @@ fn lora_changes_the_image_and_a_zero_one_does_not() {
             "256",
             "--num-steps",
             "2",
+            "--output",
+            name,
+        ];
+        if let Some(l) = lora {
+            args.extend(["--lora", l]);
+        }
+        let out = mixel(&args, dir.path());
+        assert!(
+            out.status.success(),
+            "{}\n{}",
+            text(&out.stdout),
+            text(&out.stderr)
+        );
+        std::fs::read(dir.path().join(name)).unwrap()
+    };
+    let plain = image("plain.png", None);
+    assert_eq!(image("zero.png", Some("zero.safetensors")), plain);
+    assert_ne!(image("some.png", Some("some.safetensors")), plain);
+}
+
+#[test]
+#[ignore = "needs the ~31 GB Qwen-Image-2.1 weights and a GPU; run with --ignored"]
+fn qwen_lora_changes_the_image_and_a_zero_one_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let layer = "transformer.transformer_blocks.0.attn.to_q";
+    write_lora_on(&dir.path().join("zero.safetensors"), layer, 4096, 4096, 0.0);
+    write_lora_on(
+        &dir.path().join("some.safetensors"),
+        layer,
+        4096,
+        4096,
+        0.01,
+    );
+    let image = |name: &str, lora: Option<&str>| {
+        let mut args = vec![
+            "--model",
+            "qwen-fast",
+            "--quantize",
+            "4",
+            "--prompt",
+            "a red apple",
+            "--seed",
+            "5",
+            "--width",
+            "256",
+            "--height",
+            "256",
             "--output",
             name,
         ];

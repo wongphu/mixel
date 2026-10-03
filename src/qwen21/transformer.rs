@@ -84,6 +84,20 @@ impl Transformer {
         })
     }
 
+    /// Adds a LoRA's update to the layer it names (see [`lora_targets`]).
+    /// With the 4-step adapter, `proj_out` is replaced by per-step heads, so
+    /// a LoRA can't change it.
+    pub fn add_lora(&mut self, layer: &str, down: Array, up: Array) -> Result<()> {
+        anyhow::ensure!(
+            !(layer == "proj_out" && !self.heads.is_empty()),
+            "a LoRA on proj_out can't be combined with the 4-step adapter, which replaces it"
+        );
+        for (layer, down, up) in lora_targets(layer, down, up)? {
+            self.w.add_lora(&layer, down, up)?;
+        }
+        Ok(())
+    }
+
     /// Applies the 4-step adapter: adds its low-rank updates, swaps in its
     /// norm weights, and switches `proj_out` to its per-step heads.
     pub fn apply_adapter(&mut self, adapter: Adapter) -> Result<()> {
@@ -481,9 +495,64 @@ fn apply_rope(x: &Array, rope: &(Array, Array), dtype: Dtype) -> Result<Array> {
     Ok(out.as_dtype(dtype)?)
 }
 
+/// The layers a LoRA update to `layer` goes to. ComfyUI fuses each block's
+/// `img_mlp.gate_layer` and `img_mlp.proj` into one `img_mlp.gate_up`, gate
+/// first, and LoRAs trained there address it: its update splits into the
+/// two, the first half of its output rows for the gate (as ComfyUI's own
+/// LoRA loader maps them), both sharing `down`.
+pub fn lora_targets(layer: &str, down: Array, up: Array) -> Result<Vec<(String, Array, Array)>> {
+    let Some(block) = layer.strip_suffix(".img_mlp.gate_up") else {
+        return Ok(vec![(layer.to_string(), down, up)]);
+    };
+    let rows = up.shape()[0];
+    anyhow::ensure!(
+        up.ndim() == 2 && rows % 2 == 0,
+        "{layer}: update {:?} doesn't split into gate and proj halves",
+        up.shape()
+    );
+    let [gate, proj]: [Array; 2] = split_at_indices(&up, &[rows / 2], 0)?
+        .try_into()
+        .expect("2 halves");
+    Ok(vec![
+        (format!("{block}.img_mlp.gate_layer"), down.clone(), gate),
+        (format!("{block}.img_mlp.proj"), down, proj),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fused_gate_up_updates_split_into_gate_and_proj() {
+        crate::nn::test_device();
+        let down = Array::from_slice(&[1.0f32, 2.0], &[1, 2]);
+        // Rows 0-1 for the gate, 2-3 for proj.
+        let up = Array::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4, 1]);
+        let t = lora_targets("transformer_blocks.3.img_mlp.gate_up", down, up).unwrap();
+        let names: Vec<_> = t.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "transformer_blocks.3.img_mlp.gate_layer",
+                "transformer_blocks.3.img_mlp.proj"
+            ]
+        );
+        let rows = |a: &Array| {
+            let a = a.contiguous().unwrap();
+            a.eval().unwrap();
+            a.as_slice::<f32>().to_vec()
+        };
+        assert_eq!(
+            (rows(&t[0].2), rows(&t[1].2)),
+            (vec![1.0, 2.0], vec![3.0, 4.0])
+        );
+        assert_eq!(rows(&t[1].1), [1.0, 2.0]);
+        // Other layers go through unchanged.
+        let other = Array::from_slice(&[0.0f32; 2], &[2, 1]);
+        let t = lora_targets("img_in", Array::from_slice(&[0.0f32; 2], &[1, 2]), other).unwrap();
+        assert_eq!(t[0].0, "img_in");
+    }
 
     #[test]
     fn image_positions_are_centered() {
@@ -514,6 +583,7 @@ mod tests {
 
     #[test]
     fn text_mask_sees_prefix_and_is_causal_within() {
+        crate::nn::test_device();
         let m = text_mask(2, 2).unwrap();
         m.eval().unwrap();
         assert_eq!(

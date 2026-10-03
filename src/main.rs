@@ -92,7 +92,7 @@ Recipes:
           --prompt \"make it night\" --seed 1 --output night.png
   Variation of an image (img2img; lower --strength = closer to it):
     mixel --init-image in.png --strength 0.7 --prompt \"...\" --seed 1 --output v.png
-  Add a LoRA trained for z-image-turbo (repeatable; FILE[:SCALE]):
+  Add a LoRA trained for the model (repeatable; FILE[:SCALE]):
     mixel --lora style.safetensors:0.8 --prompt \"<its trigger> ...\" --seed 1 --output s.png
   Many images (loads the model once; much faster than a loop):
     mixel --input jobs.jsonl --output-dir out --seed 1
@@ -250,9 +250,10 @@ struct Args {
     #[arg(long, requires = "quantize")]
     no_cache: bool,
 
-    /// Add a LoRA (z-image-turbo only): a .safetensors file, with an optional
-    /// strength, e.g. --lora style.safetensors:0.8 [default: 1]. Repeat for
-    /// several; their effects add up. Applies to every image of a batch.
+    /// Add a LoRA trained for the model (z-image-turbo or Qwen-Image-2.1): a
+    /// .safetensors file, with an optional strength, e.g. --lora
+    /// style.safetensors:0.8 [default: 1]. Repeat for several; their effects
+    /// add up. Applies to every image of a batch.
     #[arg(long = "lora", value_name = "FILE[:SCALE]")]
     loras: Vec<String>,
 
@@ -748,11 +749,6 @@ fn run(args: Args) -> Result<()> {
         .iter()
         .map(|s| Lora::parse(s))
         .collect::<Result<Vec<_>>>()?;
-    anyhow::ensure!(
-        loras.is_empty() || args.model() == Model::ZImageTurbo,
-        "--lora works with z-image-turbo only, not {}",
-        args.model()
-    );
     let mut lora_lines = Vec::new();
     for lora in &loras {
         let layers = lora.layers()?;
