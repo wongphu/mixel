@@ -1,6 +1,6 @@
 ---
 name: "mixel"
-description: "Generate and edit images with mixel, the user's local Z-Image-Turbo / Qwen-Image-2.1 generator on Apple Silicon: write and validate JSONL batch files, run or hand off the command, fix flaws with fast reference-image edits, and keep characters consistent across illustrated stories."
+description: "Generate and edit images with mixel, the user's local Z-Image-Turbo / Qwen-Image-2.1 generator on Apple Silicon: write and validate JSONL batch files, pick settings for the Mac's memory (`--quantize`), add LoRAs, run or hand off the command, fix flaws with fast reference-image edits, and keep characters consistent across illustrated stories."
 ---
 
 # mixel
@@ -9,17 +9,17 @@ mixel is a command-line image generator the user wrote (`~/code/mixel`, installe
 
 **mixel is under active development, and this skill can lag behind it.** The version number doesn't always change when the CLI does. The authoritative reference is `mixel --help` (it ends with a USAGE GUIDE written for agents) and `~/code/mixel/README.md`. If you have a shell on the user's Mac, run `mixel --help` before relying on anything below; if it disagrees with this skill, follow `--help` and tell the user which part of the skill is stale.
 
-This version was written from mixel commit `bb2fb20` (2026-10-01).
+This version was written from mixel 0.5.0 (commit `bb7c156`, 2026-10-03). `mixel --version` tells you what's installed; builds before 0.5.0 lack some of what follows (`--quantize` came in 0.4.0, `--lora` and the weight cache in 0.5.0).
 
 ## Models
 
 | `--model` (alias) | Use for | Steps | 1024×1024 image | Edit with one ~1024² reference | Peak memory |
 |---|---|---|---|---|---|
-| `z-image-turbo` (`turbo`, default) | text-to-image, img2img | 9 (default) | ~59 s | — (can't take references) | ~36 GB |
-| `qwen-image-2.1-fast` (`qwen-fast`) | **editing with reference images**; also t2i, img2img | 4 (fixed) | ~37 s | ~64 s | ~52–65 GB |
-| `qwen-image-2.1` (`qwen`) | editing when the fast variant's detail isn't enough; also t2i, img2img | 40 (default) | ~6 min | ~7.5 min | ~52–65 GB |
+| `z-image-turbo` (`turbo`, default) | text-to-image, img2img, LoRAs | 9 (default) | ~59 s | — (can't take references) | ~13.5 GB |
+| `qwen-image-2.1-fast` (`qwen-fast`) | **editing with reference images**; also t2i, img2img | 4 (fixed) | ~38 s | ~58 s | ~17–18 GB |
+| `qwen-image-2.1` (`qwen`) | editing when the fast variant's detail isn't enough; also t2i, img2img | 40 (default) | ~6 min | ~8 min | ~17–18 GB |
 
-Times are medians on an M3 Max (30-core GPU, 96 GB) with the weights cached; GB here is 2^30 bytes. 512×512 with Z-Image takes about 13 s, which is good for drafts.
+Times are medians on an M3 Max (30-core GPU, 96 GB) with the weights cached; peak memory is at 1024×1024 in bf16, in GB of 2^30 bytes (less with `--quantize`, below). 512×512 with Z-Image takes about 14 s, which is good for drafts.
 
 - The model is chosen once per run with `--model`; it can't vary per JSONL line. Put Z-Image lines and Qwen edit lines in separate files.
 - **For edits, start with `qwen-image-2.1-fast`.** It's 7–10× faster than `qwen-image-2.1`. Its authors note small dense text can lose legibility and some edits come out slightly blurrier and darker; switch to `qwen-image-2.1` only when that matters.
@@ -35,6 +35,30 @@ Guidance is off by default for all three models, as they're meant to run; turnin
 - `z-image-turbo`: on for any `guidance_scale` above 0, steering away from `negative_prompt` (or from the empty prompt without one). **A negative prompt with guidance off is rejected.** Older batch files used e.g. `5` with a negative prompt; the equivalent now is `4`.
 - `qwen-image-2.1`: on above 1, and needs a negative prompt.
 - `qwen-image-2.1-fast`: no guidance.
+
+## Memory: `--quantize` and smaller Macs
+
+Peak memory at 1024×1024, by setting:
+
+| | bf16 (default) | `--quantize 8` | `--quantize 4` |
+|---|---:|---:|---:|
+| `z-image-turbo` | 13.5 GB | 8.3 GB | 5.4 GB |
+| Qwen models, text-to-image | 17 GB | 10.9 GB | 7.5 GB |
+| Qwen models, edit with a ~1024² reference | 18.3 GB | 12.2 GB | 9 GB |
+
+- The GPU may only use part of the Mac's memory (~74% on a 16 GB Mac, 81% on a 96 GB one); a run that needs more doesn't fail but runs 2–3× slower. Check the memory with `sysctl -n hw.memsize` and pick: **16 GB**: `--quantize 8` for z-image-turbo, `--quantize 4` for the Qwen models (on an M4 Mac mini: ~155 s per 1024² turbo image, ~90 s per 4-step Qwen image, ~125 s per edit). **8 GB** (untested): z-image-turbo with `--quantize 4`, borderline at 1024² (5.4 GB), safer at 512² (4.6 GB). **32 GB and up**: everything in bf16.
+- **8 bits gives practically the same images as bf16. 4 bits gives images as good but not the same ones**: a seed reproduces a different picture. Keep one setting for a whole project, or a rerun or edit won't match the earlier images. Quantized steps are ~10–25% slower on an M3 Max; on an M4, 8 and 4 bits run at the same speed.
+- The first `--quantize` run saves the quantized weights to `~/.cache/mixel/weights` (6 GB for z-image-turbo at 4 bits, 8.7 GB for the Qwen models; more at 8 bits), printing `Cache: saved …`, and is slower. Later runs load them in seconds (on a 16 GB Mac mini 1–5 s instead of ~17 s). Tell the user about the disk space; `rm -rf ~/.cache/mixel` frees it, `--no-cache` skips it.
+- `--quantize` is per run, like `--model`: not a JSONL field.
+
+## LoRAs (z-image-turbo only)
+
+`--lora FILE[:SCALE]` adds a LoRA trained for Z-Image-Turbo (a `.safetensors` file, e.g. from Hugging Face), at its trained strength by default; `:0.7` weakens it, and `--lora` can repeat (effects add up). It works with `--quantize` too.
+
+- It applies to every image of the run (not a JSONL field): images that need different LoRAs go in separate runs.
+- Most LoRAs need their trigger phrase from the model card in the prompt (e.g. "Pixel art style."); without it the effect is often small.
+- The file is checked before the model loads: text-encoder LoRAs, DoRA and kohya's `lora_unet_…` names are rejected with the reason, and the Qwen models refuse `--lora`.
+- Check the LoRA's license on its model card before commercial use.
 
 ## JSONL format
 
@@ -65,11 +89,12 @@ mixel --input story.jsonl --output-dir out/story
 ```
 
 - Batch mode validates every line before loading the model and lists all errors at once with line numbers. Fix and rerun.
+- A run loads in two phases: the text encoders (`Loaded in …`), which encode every prompt, then the transformer and VAE (a second `Loaded in …`); only then do the images start.
 - Existing outputs are skipped, so an interrupted batch resumes by rerunning the same command. `--overwrite` regenerates. To redo one image, delete that file and rerun.
 - CLI flags (`--seed`, `--width`, `--num-steps`, `--negative-prompt`, …) act as defaults for lines that omit them.
 - Exit 0 on success; non-zero if any line failed (the rest still generate). Each saved image prints `Done! Image saved to <path> (<secs>s)`; the end prints `Batch finished: N generated, N skipped, N failed`.
 - The first run downloads ~33 GB (turbo) or ~31 GB (qwen; the fast variant adds 0.35 GB) to `~/.cache/huggingface`.
-- **Run one mixel at a time** (memory). Before starting one, check none is already running (`pgrep -fl '^mixel'`). An 18-image 896×1152 turbo batch takes about 20 minutes, so if you run it yourself, run it in the background and wait for it to finish rather than polling.
+- **Run one mixel at a time** (memory). Before starting one, check none is already running (`pgrep -fl '^mixel'`). An 18-image 896×1152 turbo batch takes about 20 minutes on an M3 Max (two to three times that on a 16 GB Mac mini), so if you run it yourself, run it in the background and wait for it to finish rather than polling.
 
 Single images: `mixel --prompt "..." --seed 1 --output fox.png` (always pass `--prompt`; without it a default landscape prompt is used). `--input` can't be combined with `--prompt` or `--output`.
 
@@ -157,6 +182,6 @@ img2img tips (any model): changing *what* is in the picture keeps pose and frami
 ## Deliverable
 
 - The `.jsonl` file (named after the project, e.g. `jack_and_the_beanstalk.jsonl`), validated.
-- The exact run command, with the `--output-dir`.
+- The exact run command, with the `--output-dir` (and `--model`, `--quantize`, `--lora` if used: they're per run, and change the images).
 - A short list of the scenes/ids, so the user can map files to the story.
 - If you ran it: the output folder, how long it took, any failed lines, and which images were edited afterwards (so a rerun won't reproduce them).
