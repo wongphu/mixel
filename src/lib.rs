@@ -1,5 +1,5 @@
 //! Text-to-image, img2img and image editing on Apple Silicon with mlx-rs:
-//! Z-Image-Turbo and Qwen-Image-2.1.
+//! Z-Image-Turbo, Qwen-Image-2.1 and MOSS-Image-SFT.
 //!
 //! ```no_run
 //! use mixel::{GenerateOptions, LoadOptions, Pipeline};
@@ -12,7 +12,8 @@
 //! # anyhow::Ok(())
 //! ```
 //!
-//! [`zimage`] and [`qwen21`] hold the models themselves for lower-level use.
+//! [`zimage`], [`qwen21`] and [`moss`] hold the models themselves for
+//! lower-level use.
 
 mod autoencoder_kl;
 pub mod lora;

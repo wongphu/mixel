@@ -34,7 +34,8 @@ GIB=1073741824
 
 # id | label | model | extra args | steps | runs | peak GB | reference s | reference s/step
 # Peak memory and reference times are from $REF_HW (peaks with the encoders
-# unloaded before generating; times from the 2026-10-02 report).
+# unloaded before generating; times from the 2026-10-02 report, MOSS-Image's
+# from 2026-10-23).
 TESTS=(
   "z512|Z-Image-Turbo, 512x512|z-image-turbo|--width 512 --height 512|9|3|12.6|13.6|1.4"
   "z1024|Z-Image-Turbo, 1024x1024|z-image-turbo||9|3|13.5|59.3|6.3"
@@ -44,6 +45,7 @@ TESTS=(
   "fastq4|Qwen-Image-2.1 fast 4-bit, 1024x1024|qwen-image-2.1-fast|--quantize 4|4|3|7.5|43.8|10.3"
   "fastedit|Qwen-Image-2.1 fast, edit|qwen-image-2.1-fast|--ref-image REF|4|3|18.3|57.8|10.5"
   "fasteditq4|Qwen-Image-2.1 fast 4-bit, edit|qwen-image-2.1-fast|--ref-image REF --quantize 4|4|3|9.0|64.6|11.7"
+  "mossfast|MOSS-Image fast, 1024x1024|moss-image-fast||4|3|15.1|29.8|6.8"
   "qwen|Qwen-Image-2.1, 1024x1024|qwen-image-2.1||40|3|16.7|365.6|9.1"
   "qwenedit|Qwen-Image-2.1, edit|qwen-image-2.1|--ref-image REF|40|3|18.3|484.1|11.7"
 )
@@ -53,6 +55,8 @@ repo_of() {
     z-image-turbo) echo "Tongyi-MAI/Z-Image-Turbo" ;;
     qwen-image-2.1) echo "Qwen/Qwen-Image-2.1" ;;
     qwen-image-2.1-fast) echo "Qwen/Qwen-Image-2.1 alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs" ;;
+    moss-image) echo "OpenMOSS-Team/MOSS-Image-SFT" ;;
+    moss-image-fast) echo "OpenMOSS-Team/MOSS-Image-SFT darask0/MOSS-Image_4-step_adapter_lora" ;;
   esac
 }
 download_gb() {
@@ -60,6 +64,8 @@ download_gb() {
     Tongyi-MAI/Z-Image-Turbo) echo 33 ;;
     Qwen/Qwen-Image-2.1) echo 31 ;;
     alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs) echo 0.4 ;;
+    OpenMOSS-Team/MOSS-Image-SFT) echo 25 ;;
+    darask0/MOSS-Image_4-step_adapter_lora) echo 1.2 ;;
   esac
 }
 
@@ -343,7 +349,7 @@ done
   echo "  so a wide range mostly shows how much this one throttles under sustained load. Loading"
   echo "  the model adds a few seconds per run of mixel; the first run of a model also downloads it."
   echo "- **Per step**: denoising time per step, the part that grows with the step count: Z-Image-Turbo"
-  echo "  runs 9 steps, Qwen-Image-2.1 fast 4 and Qwen-Image-2.1 40."
+  echo "  runs 9 steps, Qwen-Image-2.1 fast 4, Qwen-Image-2.1 40 and MOSS-Image fast 4."
   echo "- **Peak memory**: the most memory mixel used (1 GB = 2^30 bytes, as Apple counts RAM)."
   echo "  Tests that need more than the GPU's working set (the part of memory macOS lets the GPU"
   echo "  use) are skipped. \"Swapped\" means macOS moved memory to disk during the test, which"
