@@ -35,6 +35,14 @@ pub struct Transformer {
     time_f32: Option<HashMap<String, Array>>,
 }
 
+/// The timestep's modulation, shared by every block (6 vectors of
+/// (1, 1, DIM): attention shift, scale, gate, then the same for the
+/// feed-forward) and the output layer's (shift, scale).
+pub struct Modulation {
+    blocks: Vec<Array>,
+    head: Vec<Array>,
+}
+
 /// A prompt prepared for [`Transformer::forward`] at one image size: its
 /// tokens after the text blocks, and the joint sequence's RoPE tables.
 pub struct Conditioning {
@@ -129,36 +137,39 @@ impl Transformer {
         cond: &Conditioning,
         skip: Option<usize>,
     ) -> Result<Array> {
+        self.forward_with(x, &self.modulation(t)?, cond, skip)
+    }
+
+    /// [`Self::forward`] with the timestep's [`Modulation`] computed once
+    /// (both passes of a guided step share it).
+    pub fn forward_with(
+        &self,
+        x: &Array,
+        m: &Modulation,
+        cond: &Conditioning,
+        skip: Option<usize>,
+    ) -> Result<Array> {
         let n_img = x.shape()[1];
-        let (modulation, head) = self.modulation(t)?;
         let video = linear(&x.as_dtype(self.dtype)?, &self.w, "video_embedder")?;
         let mut u = concatenate(&[&video, &cond.text], 1)?;
         for i in (0..NUM_LAYERS).filter(|&i| Some(i) != skip) {
-            u = self.block(
-                &format!("layers.{i}"),
-                &u,
-                &cond.cos,
-                &cond.sin,
-                &modulation,
-            )?;
+            u = self.block(&format!("layers.{i}"), &u, &cond.cos, &cond.sin, &m.blocks)?;
         }
         // The image tokens, in the model dtype (the adapter's f32 residual
         // stream is rounded here, like the reference).
         let x = split_at_indices(&u, &[n_img], 1)?
             .swap_remove(0)
             .as_dtype(self.dtype)?;
-        let [shift, scale]: [Array; 2] = head.try_into().expect("2 chunks");
+        let [shift, scale] = [&m.head[0], &m.head[1]];
         let x = self
             .norm(&x, "final_norm_video")?
             .multiply(scale.add(scalar(1.0, scale.dtype())?)?)?
-            .add(&shift)?;
+            .add(shift)?;
         linear(&x.as_dtype(self.dtype)?, &self.w, "final_linear_video")
     }
 
-    /// The shared block modulation (6 vectors of (1, 1, DIM): attention shift,
-    /// scale, gate, then the same for the feed-forward) and the output layer's
-    /// (shift, scale), from the timestep `t`.
-    fn modulation(&self, t: f32) -> Result<(Vec<Array>, Vec<Array>)> {
+    /// The [`Modulation`] at time `t` (sigma * 1000).
+    pub fn modulation(&self, t: f32) -> Result<Modulation> {
         // Like the reference: the sinusoid in f64, the embedding in f32, the
         // layers in the model dtype, or all in f32 with the adapter.
         let half = FREQ_DIM / 2;
@@ -195,10 +206,10 @@ impl Transformer {
                 .map(|c| c.reshape(&[1, 1, DIM]))
                 .collect::<std::result::Result<_, _>>()?)
         };
-        Ok((
-            chunks("shared_block_modulation", 6)?,
-            chunks("video_head_modulation", 2)?,
-        ))
+        Ok(Modulation {
+            blocks: chunks("shared_block_modulation", 6)?,
+            head: chunks("video_head_modulation", 2)?,
+        })
     }
 
     fn block(&self, p: &str, x: &Array, cos: &Array, sin: &Array, m: &[Array]) -> Result<Array> {
@@ -311,13 +322,11 @@ fn rope_tables(h: i32, w: i32, text_len: i32, dtype: Dtype) -> Result<(Array, Ar
     let mut cos = Vec::with_capacity(n * 2 * half);
     let mut sin = Vec::with_capacity(n * 2 * half);
     for pos in coords {
-        let phases: Vec<f32> = pos
-            .iter()
-            .flat_map(|&p| bands.iter().map(move |&b| p * b))
-            .collect();
+        let phases = pos.iter().flat_map(|&p| bands.iter().map(move |&b| p * b));
+        let (s, c): (Vec<f32>, Vec<f32>) = phases.map(|p| (p.sin(), p.cos())).unzip();
         for _ in 0..2 {
-            sin.extend(phases.iter().map(|p| p.sin()));
-            cos.extend(phases.iter().map(|p| p.cos()));
+            sin.extend_from_slice(&s);
+            cos.extend_from_slice(&c);
         }
     }
     let shape = [1, n as i32, 1, (2 * half) as i32];

@@ -272,10 +272,7 @@ impl GenerateOptions {
         match self.init_image {
             Some(_) => self
                 .num_steps
-                .saturating_sub(crate::zimage::scheduler::start_index(
-                    self.num_steps,
-                    self.strength,
-                )),
+                .saturating_sub(crate::schedule::start_index(self.num_steps, self.strength)),
             None => self.num_steps,
         }
     }
@@ -400,7 +397,9 @@ impl GenerateOptions {
 pub enum Progress {
     /// The prompt was encoded into this many tokens.
     Encoded { tokens: usize },
-    /// A denoising step finished (1-based `step`).
+    /// A denoising step finished (1-based `step`): `t` is the model's time
+    /// input for it, normalized to [0, 1] (in each model's own convention),
+    /// and `sigma` the noise level it left.
     Step {
         step: usize,
         total: usize,
@@ -633,6 +632,16 @@ impl Encoded {
         }
     }
 
+    /// Whether the prompt was cut to the text encoder's limit (Z-Image-Turbo
+    /// and MOSS-Image; Qwen-Image-2.1 reads the whole prompt).
+    pub fn truncated(&self) -> bool {
+        match &self.inner {
+            EncodedInner::ZImage(e) => e.truncated,
+            EncodedInner::Qwen(_) => false,
+            EncodedInner::Moss(e) => e.truncated,
+        }
+    }
+
     /// Memory it takes.
     pub fn nbytes(&self) -> usize {
         match &self.inner {
@@ -687,6 +696,39 @@ pub(crate) fn to_rgb_image(img: &Array) -> Result<image::RgbImage> {
     img.eval()?;
     image::ImageBuffer::from_raw(width, height, img.as_slice::<u8>().to_vec())
         .ok_or_else(|| anyhow::anyhow!("image buffer size mismatch"))
+}
+
+/// An 8-bit image (RGB or RGBA) as a VAE input, (1, H, W, channels) in
+/// [-1, 1], f32.
+pub(crate) fn image_to_array<P>(img: &image::ImageBuffer<P, Vec<u8>>) -> Array
+where
+    P: image::Pixel<Subpixel = u8>,
+{
+    let pixels: Vec<f32> = img
+        .as_raw()
+        .iter()
+        .map(|&p| p as f32 / 127.5 - 1.0)
+        .collect();
+    let shape = [
+        1,
+        img.height() as i32,
+        img.width() as i32,
+        P::CHANNEL_COUNT as i32,
+    ];
+    Array::from_slice(&pixels, &shape)
+}
+
+/// A VAE output in [-1, 1] -> 8-bit pixels, rounded like diffusers'
+/// `postprocess` (computed in f32).
+pub(crate) fn to_pixels(x: &Array) -> Result<Array> {
+    let x = x
+        .as_dtype(mlx_rs::Dtype::Float32)?
+        .multiply(Array::from_f32(0.5))?
+        .add(Array::from_f32(0.5))?;
+    Ok(mlx_rs::ops::clip(&x, (0.0f32, 1.0f32))?
+        .multiply(Array::from_f32(255.0))?
+        .round(None)?
+        .as_dtype(mlx_rs::Dtype::Uint8)?)
 }
 
 #[cfg(test)]

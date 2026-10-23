@@ -2,9 +2,8 @@
 //! then snapped to the nearest of the 1000 sigmas the model was trained on.
 //! Everything is in f32, like the reference (torch on the CPU).
 
-use crate::zimage::scheduler::linspace;
-/// First step for img2img (`strength` < 1), like diffusers.
-pub use crate::zimage::scheduler::start_index;
+use crate::schedule::linspace;
+pub use crate::schedule::start_index;
 
 const NUM_TRAIN_TIMESTEPS: usize = 1000;
 const SHIFT: f32 = 5.0;

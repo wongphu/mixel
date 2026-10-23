@@ -21,6 +21,7 @@ pub mod moss;
 pub mod nn;
 mod pipeline;
 pub mod qwen21;
+mod schedule;
 pub mod zimage;
 
 pub use lora::Lora;

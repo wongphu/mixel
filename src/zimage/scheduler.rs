@@ -6,6 +6,9 @@
 //! (candle's port applies no shift, so its sigmas fall evenly from 1 and the
 //! steps spend less time at high noise.)
 
+use crate::schedule::linspace;
+pub use crate::schedule::start_index;
+
 const NUM_TRAIN_TIMESTEPS: f32 = 1000.0;
 const SHIFT: f32 = 3.0;
 
@@ -56,33 +59,6 @@ impl Scheduler {
     }
 }
 
-/// `torch.linspace` for f32 on the CPU: the first half counts up from
-/// `start`, the second down from `end`, so both ends are exact. Each value is
-/// one fused multiply-add, as torch's kernel compiles on Apple Silicon (for
-/// MOSS-Image's 1000 training sigmas, separate roundings differ in 239).
-pub(crate) fn linspace(start: f32, end: f32, n: usize) -> Vec<f32> {
-    if n == 1 {
-        return vec![start];
-    }
-    let step = (end - start) / (n - 1) as f32;
-    (0..n)
-        .map(|i| {
-            if i < n / 2 {
-                step.mul_add(i as f32, start)
-            } else {
-                (-step).mul_add((n - 1 - i) as f32, end)
-            }
-        })
-        .collect()
-}
-
-/// First step index for img2img: `int(n - min(n * strength, n))`, with
-/// `strength` clamped to [0, 1] so the result is never past `num_steps`.
-pub fn start_index(num_steps: usize, strength: f64) -> usize {
-    let n = num_steps as f64;
-    (n - n * strength.clamp(0.0, 1.0)) as usize
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +96,34 @@ mod tests {
         assert_eq!(sigmas(9), expect);
         assert_eq!(sigmas(4), [1.0, 0.9, 0.75, 0.5, 0.0]);
         assert_eq!(sigmas(1), [1.0, 0.0]);
+        // 20 steps (the README's style-change recipe), where linspace's
+        // fused rounding matters: separate roundings were an ulp off here.
+        let expect: Vec<f32> = [
+            0x3f800000u32,
+            0x3f7b9611,
+            0x3f76db6d,
+            0x3f71c71d,
+            0x3f6c4ec6,
+            0x3f666666,
+            0x3f5fffff,
+            0x3f590b21,
+            0x3f51745d,
+            0x3f492494,
+            0x3f400000,
+            0x3f35e50d,
+            0x3f2aaaab,
+            0x3f1e1e1d,
+            0x3f100000,
+            0x3f000000,
+            0x3edb6db8,
+            0x3eb13b15,
+            0x3e800000,
+            0x3e0ba2e9,
+            0x0,
+        ]
+        .map(f32::from_bits)
+        .to_vec();
+        assert_eq!(sigmas(20), expect);
     }
 
     #[test]

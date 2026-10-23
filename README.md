@@ -266,8 +266,9 @@ mixel --model qwen-fast --lora doodle_in_lora_qwen21.safetensors --ref-image scr
 - MOSS-Image LoRAs in ComfyUI's or diffusers' layout load as they are, with the base model
   or the 4-step one: with [an anime-style LoRA](https://huggingface.co/axiomofmind/Moss-image-anime-lora)
   (all 252 layers) on `moss-image-fast` its style shows, and at scale 0 the image is the
-  same, bit for bit. Don't pass the 4-step adapter's `lora.safetensors` as `--lora`: the
-  adapter also replaces the time embedding, which only `moss-image-fast` does.
+  same, bit for bit. mixel refuses the 4-step adapter's own `lora.safetensors` (and the
+  8-step one's) as `--lora`: the adapter also replaces the time embedding and the sampler,
+  which only `moss-image-fast` does.
 - In the library: `LoadOptions::loras`, a `Vec<mixel::Lora>`.
 
 ## As a library
@@ -450,11 +451,11 @@ kernel 8.5e-5, text embeddings 1.5–2.4% (the example prints every layer's), tr
 0.9–2.5%, scheduler sigmas bit for bit, VAE decode 7.6e-7 and encode 4.0e-6 (both in f32).
 A full 8-step run with guidance ends 41% off: guidance 3 amplifies each large step's
 rounding, and the gap grows from 0.1% after the first step. With the transformer in f32 on
-both sides the same run ends 0.18% apart, so the rest is rounding.
+both sides the same run ends 0.06% apart, so the rest is rounding.
 
 **The 4-step variant.** `scripts/make_moss_fast_reference.py` applies the adapter with its
 authors' own code; `cargo run --release --example moss_fast_parity -- <dir>` checks this port
-against it. In f32 the first step agrees to 2.7e-5 and the four steps end 1.0% apart. In
+against it. In f32 the first step agrees to 2.5e-5 and the four steps end 0.17% apart. In
 bf16 the adapted model amplifies rounding much more than the base model: the reference's own
 bf16 run is 11% off its f32 run after one step and 28% after four, and mixel's bf16 run
 ends 23% from the reference's.
@@ -462,9 +463,12 @@ ends 23% from the reference's.
 **Two PyTorch details on Macs.** torch's `linspace` on the CPU rounds each value once (a
 fused multiply-add) on Apple Silicon, and mixel's scheduler now does too: with separate
 roundings, 239 of MOSS-Image's 1000 training sigmas were an ulp off, and with them the
-snapped schedules (Z-Image's schedule comes out the same either way). And the MOSS
-transformer computes its timestep sinusoid in float64, which PyTorch's MPS backend lacks, so
-the reference script runs just that part on the CPU.
+snapped schedules. Z-Image's pipeline uses the same `linspace`, so its schedule now matches
+diffusers' bit for bit at every step count too: before, it was an ulp off at most counts
+from 13 steps up (20 included), so such images differ very slightly from mixel 0.6.0's for
+the same seed. At 9 steps, the default, nothing changes. And the MOSS transformer computes
+its timestep sinusoid in float64, which PyTorch's MPS backend lacks, so the reference script
+runs just that part on the CPU.
 
 ## Tests
 

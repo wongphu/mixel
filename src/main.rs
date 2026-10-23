@@ -174,17 +174,17 @@ Running it:
     models (GB = 2^30 bytes). Run one mixel at a time.
   - Less memory: --quantize 8 (~8 GB z-image-turbo, ~11-12 GB qwen, ~9 GB
     moss) gives practically the same images; --quantize 4 (~5.4 GB, ~7.5-9
-    GB, ~7 GB) gives images as good but not the same ones for a seed. Both are ~10-25%
-    slower per step on an M3 Max (on an M4, 8 and 4 bits run at the same
-    speed). The GPU can use only part of the memory (~74% on a 16 GB Mac);
-    past that, steps run 2-3x slower. On a 16 GB Mac use z-image-turbo
+    GB, ~7 GB) gives images as good but not the same ones for a seed. Both
+    are ~10-25% slower per step on an M3 Max (on an M4, 8 and 4 bits run at
+    the same speed). The GPU can use only part of the memory (~74% on a 16
+    GB Mac); past that, steps run 2-3x slower. On a 16 GB Mac use z-image-turbo
     --quantize 8 (~155 s per 1024x1024 image on an M4 Mac mini) and the qwen
     models with --quantize 4 (~90 s, 4 steps); the moss models fit with
     --quantize 4 or 8 (not yet timed there); 32 GB runs everything in bf16.
   - With --quantize, the first run saves the quantized weights to
     ~/.cache/mixel/weights (6 GB for z-image-turbo at 4 bits, 8.7 GB for
-    qwen, 8.3 GB for moss) and later runs load them in seconds (16 GB Mac mini: 1-5 s instead
-    of ~17 s); --no-cache skips it.
+    qwen, 8.3 GB for moss) and later runs load them in seconds (16 GB Mac
+    mini: 1-5 s instead of ~17 s); --no-cache skips it.
     Delete ~/.cache/mixel to free the space.
   - The text encoders run first for all images (a batch in chunks), then
     are freed before the transformer loads, so the two phases print two
@@ -784,6 +784,9 @@ fn run(args: Args) -> Result<()> {
     let mut lora_lines = Vec::new();
     for lora in &loras {
         let layers = lora.layers()?;
+        if matches!(args.model(), Model::MossImage | Model::MossImageFast) {
+            mixel::moss::fast::check_user_lora(lora)?;
+        }
         lora_lines.push(format!(
             "LoRA: {} (scale {}, {} layers)",
             lora.path.display(),
@@ -970,13 +973,7 @@ fn run(args: Args) -> Result<()> {
 fn generate(pipeline: &Pipeline, job: &Job, encoded: &Encoded) -> Result<()> {
     let out = pipeline.generate_encoded_with(&job.options()?, encoded, |p| match p {
         Progress::Encoded { tokens } => {
-            let limit = match job.model {
-                Model::ZImageTurbo => Some(mixel::zimage::pipeline::MAX_PROMPT_TOKENS),
-                Model::MossImage | Model::MossImageFast => Some(mixel::moss::MAX_PROMPT_TOKENS),
-                Model::QwenImage21 | Model::QwenImage21Fast => None,
-            };
-            let cut = limit.is_some_and(|limit| tokens >= limit);
-            let note = if cut {
+            let note = if encoded.truncated() {
                 " (the limit; the rest of the prompt is ignored)"
             } else {
                 ""

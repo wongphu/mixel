@@ -11,8 +11,8 @@ use super::{scheduler, OUTPUT_RESOLUTION, VAE_SCALE};
 use crate::lora::Lora;
 use crate::nn::{ModelFiles, Quantize, WeightCache};
 use crate::pipeline::{
-    composite_over_white, resize_to_fill, seeded_noise, GenerateOptions, Generated, Parts,
-    Progress, Timings,
+    composite_over_white, image_to_array, resize_to_fill, seeded_noise, to_pixels, GenerateOptions,
+    Generated, Parts, Progress, Timings,
 };
 use anyhow::{Context, Error as E, Result};
 use mlx_rs::{Array, Dtype};
@@ -350,13 +350,7 @@ impl QwenPipeline {
         img: &image::RgbaImage,
         grid: (usize, usize),
     ) -> Result<Array> {
-        let (w, h) = (img.width() as i32, img.height() as i32);
-        let px: Vec<f32> = img
-            .as_raw()
-            .iter()
-            .map(|&c| c as f32 / 127.5 - 1.0)
-            .collect();
-        let x = Array::from_slice(&px, &[1, h, w, 4]).as_dtype(self.dtype)?;
+        let x = image_to_array(img).as_dtype(self.dtype)?;
         let z = vae
             .encode(&x)?
             .reshape(&[1, (grid.0 * grid.1) as i32, 64])?;
@@ -434,14 +428,7 @@ fn split_off_front(x: &Array, n: i32) -> Result<Array> {
 fn to_image(rgba: &Array) -> Result<image::DynamicImage> {
     let sh = rgba.shape().to_vec();
     let (h, w) = (sh[1] as u32, sh[2] as u32);
-    let x = rgba
-        .as_dtype(Dtype::Float32)?
-        .multiply(Array::from_f32(0.5))?
-        .add(Array::from_f32(0.5))?;
-    let x = mlx_rs::ops::clip(&x, (0.0f32, 1.0f32))?
-        .multiply(Array::from_f32(255.0))?
-        .round(None)?;
-    let x = x.as_dtype(Dtype::Uint8)?.contiguous()?;
+    let x = to_pixels(rgba)?.contiguous()?;
     x.eval()?;
     let img = image::RgbaImage::from_raw(w, h, x.as_slice::<u8>().to_vec())
         .ok_or_else(|| anyhow::anyhow!("image buffer size mismatch"))?;

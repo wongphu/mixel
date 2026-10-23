@@ -47,7 +47,7 @@ pub fn sigmas(num_steps: usize, image_seq_len: usize) -> Vec<f32> {
 
 /// Index of the first step for img2img at `strength` (like diffusers).
 pub fn start_index(num_steps: usize, strength: f64) -> usize {
-    crate::zimage::scheduler::start_index(num_steps, strength)
+    crate::schedule::start_index(num_steps, strength)
 }
 
 #[cfg(test)]

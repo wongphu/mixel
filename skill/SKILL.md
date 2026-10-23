@@ -67,7 +67,7 @@ Peak memory at 1024×1024, by setting:
 - Most LoRAs need their trigger phrase from the model card in the prompt (e.g. "Pixel art style."); without it the effect is often small.
 - The file is checked before the model loads: text-encoder LoRAs, DoRA and kohya's `lora_unet_…` names are rejected with the reason.
 - Qwen-Image-2.1 LoRAs made for the 40-step model also work with `qwen-image-2.1-fast` (edit LoRAs such as doodle-in, which turns a magenta scribble into a named object, or Natural-Exposure). Don't pass the 4-step adapter itself as `--lora` (mixel says to use `qwen-image-2.1-fast`), and treat speed-up LoRAs for other step counts (Turbo8, Viggle) as untested.
-- Don't pass the moss 4-step adapter's own `lora.safetensors` as `--lora`; use `moss-image-fast`.
+- mixel refuses the moss 4-step adapter's own `lora.safetensors` (or the 8-step one's) as `--lora`: use `moss-image-fast`.
 - Check the LoRA's license on its model card before commercial use.
 
 ## JSONL format
@@ -123,7 +123,7 @@ Repeat `--ref-image` for several images ("the cat from image 1 on the sofa from 
 - **Shell on the user's Mac available** (device bash, Claude Code in the repo): write the JSONL next to where the images should go, validate, run it, then show the results.
 - **No shell on the Mac** (a cloud sandbox, claude.ai chat): you can't run mixel. Write and validate the JSONL, deliver it as a file, and give the exact command with the output dir. Don't pretend to generate images.
 
-Always validate before handing over or running. This checks what mixel checks up front, minus file existence and CLI-flag defaults:
+Always validate before handing over or running. This checks what mixel checks up front, minus file existence and most CLI-flag defaults; pass the run's `--guidance-scale`, if it sets one, as a third argument:
 
 ```python
 import json, sys
@@ -131,7 +131,7 @@ ALLOWED = {"prompt","id","negative_prompt","width","height","num_steps","guidanc
            "seed","output","init_image","strength","reference_images"}
 MODELS = {"turbo":"z-image-turbo","qwen":"qwen-image-2.1","qwen-fast":"qwen-image-2.1-fast",
           "moss":"moss-image","moss-fast":"moss-image-fast"}
-def validate(path, model="z-image-turbo"):
+def validate(path, model="z-image-turbo", guidance=None):
     model = MODELS.get(model, model)
     qwen = model.startswith("qwen"); fast = model == "qwen-image-2.1-fast"
     turbo = model == "z-image-turbo"; moss = model == "moss-image"; moss_fast = model == "moss-image-fast"
@@ -149,8 +149,8 @@ def validate(path, model="z-image-turbo"):
         if "strength" in d and not 0 < d["strength"] <= 1: errs.append(f"line {n}: strength out of (0,1]")
         if "reference_images" in d and not qwen: errs.append(f"line {n}: reference_images need a qwen model")
         if fast and d.get("num_steps", 4) != 4: errs.append(f"line {n}: qwen-image-2.1-fast always runs 4 steps")
-        g, neg = d.get("guidance_scale"), d.get("negative_prompt")
-        if turbo and neg and not (g or 0) > 0: errs.append(f"line {n}: negative_prompt needs guidance_scale > 0 on turbo (unless --guidance-scale is set)")
+        g, neg = d.get("guidance_scale", guidance), d.get("negative_prompt")
+        if turbo and neg and not (g or 0) > 0: errs.append(f"line {n}: negative_prompt needs guidance_scale > 0 on turbo")
         if fast and neg and (g or 0) > 1: errs.append(f"line {n}: qwen-image-2.1-fast has no guidance")
         if moss and neg and g == 1: errs.append(f"line {n}: negative_prompt needs guidance (guidance_scale 1 turns it off on moss-image)")
         if moss_fast and (neg or g not in (None, 1)): errs.append(f"line {n}: moss-image-fast has no guidance")
@@ -162,7 +162,8 @@ def validate(path, model="z-image-turbo"):
         if (k := out.lower()) in seen: errs.append(f"line {n}: output {out} also used by line {seen[k]}")
         seen[out.lower()] = n
     print("\n".join(errs) or f"OK: {len(seen)} images"); return not errs
-validate(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "z-image-turbo")
+validate(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "z-image-turbo",
+         float(sys.argv[3]) if len(sys.argv) > 3 else None)
 ```
 
 ## Illustrated stories and consistent characters

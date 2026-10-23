@@ -37,6 +37,28 @@ pub(crate) const TIME_TENSORS: [&str; 6] = [
     "video_head_modulation.bias",
 ];
 
+/// Fails if `lora` is a data-space DMD adapter's LoRA (this one, or the
+/// 8-step one it continues), which as a plain `--lora` would run without the
+/// adapter's time path and sampler. Both are rank 128 on all the block
+/// projections, with metadata holding only the rank and alpha (and the
+/// training steps); regular LoRAs carry their trainer's metadata or none.
+pub fn check_user_lora(lora: &Lora) -> Result<()> {
+    let (_, metadata) = Array::load_safetensors_with_metadata(&lora.path)
+        .with_context(|| format!("reading LoRA {}", lora.path.display()))?;
+    let adapter_like = metadata.get("rank").map(String::as_str) == Some("128")
+        && metadata.contains_key("alpha")
+        && metadata
+            .keys()
+            .all(|k| matches!(k.as_str(), "rank" | "alpha" | "iteration" | "steps"));
+    anyhow::ensure!(
+        !(adapter_like && lora.layers()?.len() == LORA_LAYERS),
+        "{} looks like a few-step adapter for MOSS-Image (data-space DMD), not a LoRA: \
+         it needs its own time embedding and sampler. Use --model moss-image-fast instead.",
+        lora.path.display()
+    );
+    Ok(())
+}
+
 /// The loaded adapter, ready to apply to the transformer.
 pub struct Adapter {
     pub(crate) lora: Lora,
@@ -101,5 +123,60 @@ impl Adapter {
             q,
             step_codes,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A LoRA file on all 252 block projections (tiny tensors), with `metadata`.
+    fn write_lora(dir: &std::path::Path, name: &str, metadata: &[(&str, &str)]) -> Lora {
+        let mut arrays = HashMap::new();
+        for i in 0..42 {
+            for p in ["q", "k", "v", "o", "ffn_up_gate", "ffn_down"] {
+                let l = format!("diffusion_model.layers.{i}.proj.{p}");
+                arrays.insert(
+                    format!("{l}.lora_down.weight"),
+                    Array::zeros::<f32>(&[1, 4]).unwrap(),
+                );
+                arrays.insert(
+                    format!("{l}.lora_up.weight"),
+                    Array::zeros::<f32>(&[4, 1]).unwrap(),
+                );
+                arrays.insert(format!("{l}.alpha"), Array::from_f32(1.0));
+            }
+        }
+        let metadata: HashMap<String, String> = metadata
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let path = dir.join(name);
+        Array::save_safetensors(arrays, &metadata, &path).unwrap();
+        Lora { path, scale: 1.0 }
+    }
+
+    #[test]
+    fn refuses_the_adapters_lora_but_not_a_regular_one() {
+        crate::nn::test_device();
+        let dir = tempfile::tempdir().unwrap();
+        let rapid = [
+            ("rank", "128"),
+            ("alpha", "128.0"),
+            ("iteration", "500"),
+            ("steps", "4"),
+        ];
+        let err = check_user_lora(&write_lora(dir.path(), "a.safetensors", &rapid)).unwrap_err();
+        assert!(err.to_string().contains("moss-image-fast"), "{err}");
+        let eight_step = [("rank", "128"), ("alpha", "128.0")];
+        assert!(check_user_lora(&write_lora(dir.path(), "b.safetensors", &eight_step)).is_err());
+        // A regular LoRA: no metadata, or its trainer's.
+        check_user_lora(&write_lora(dir.path(), "c.safetensors", &[])).unwrap();
+        let kohya = [
+            ("ss_network_dim", "128"),
+            ("rank", "128"),
+            ("alpha", "128.0"),
+        ];
+        check_user_lora(&write_lora(dir.path(), "d.safetensors", &kohya)).unwrap();
     }
 }
