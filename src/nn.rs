@@ -626,6 +626,20 @@ impl ModelFiles {
         })
     }
 
+    /// The hub repo `repo_id` at a fixed `revision` (a commit hash), for
+    /// files checked against that version.
+    pub fn at_revision(repo_id: &str, revision: &str) -> Result<Self> {
+        let repo = hf_hub::Repo::with_revision(
+            repo_id.to_string(),
+            hf_hub::RepoType::Model,
+            revision.to_string(),
+        );
+        Ok(Self {
+            local: None,
+            repo: Some(hf_hub::api::sync::Api::new()?.repo(repo)),
+        })
+    }
+
     pub fn get(&self, name: &str) -> Result<std::path::PathBuf> {
         match (&self.local, &self.repo) {
             (Some(dir), _) => {

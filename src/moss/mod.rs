@@ -5,7 +5,9 @@
 //! text encoder. Every stage is checked against the PyTorch reference in
 //! `examples/moss_parity.rs`.
 
+pub mod fast;
 pub mod gated_delta;
+pub mod pipeline;
 pub mod prompt;
 pub mod scheduler;
 pub mod text_encoder;

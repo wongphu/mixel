@@ -26,12 +26,9 @@ from diffusers import AutoencoderKLFlux2
 from transformers import AutoModel, AutoTokenizer
 from transformers.models.qwen3_5 import modeling_qwen3_5
 
-SNAP = sys.argv[1]
-sys.path.insert(0, SNAP)
-import pipeline_moss_image as moss  # noqa: E402  (the reference implementation)
-
 dev = "mps"
 bf16 = torch.bfloat16
+moss = None  # pipeline_moss_image, the reference implementation (see load_pipeline)
 
 
 # MPS has no float64, which the transformer's timestep sinusoid is computed
@@ -71,17 +68,26 @@ def _moss_forward(self, hidden_states, timestep, encoder_hidden_states,
     return moss.Transformer2DModelOutput(sample=sample) if return_dict else (sample,)
 
 
-moss.MOSSImageTransformer.forward = _moss_forward
-pipe = moss.MOSSImagePipeline(
-    transformer=moss.MOSSImageTransformer.from_pretrained(SNAP, subfolder="transformer", torch_dtype=bf16).eval(),
-    scheduler=moss.MOSSImageScheduler.from_pretrained(SNAP, subfolder="scheduler"),
-    text_encoder=AutoModel.from_pretrained(f"{SNAP}/text_encoder", dtype=bf16).eval(),
-    tokenizer=AutoTokenizer.from_pretrained(f"{SNAP}/tokenizer"),
-    vae=AutoencoderKLFlux2.from_pretrained(SNAP, subfolder="vae", torch_dtype=torch.float32).eval(),
-).to(dev)
-# As the model card does: rebuild the scheduler from its own config.
-pipe.scheduler = type(pipe.scheduler).from_config(pipe.scheduler.config)
-pipe.set_progress_bar_config(disable=True)
+def load_pipeline(snap):
+    """The reference pipeline from the snapshot `snap`: bf16 on MPS, the VAE
+    in f32. Also used by make_moss_fast_reference.py."""
+    global moss
+    sys.path.insert(0, snap)
+    import pipeline_moss_image
+
+    moss = pipeline_moss_image
+    moss.MOSSImageTransformer.forward = _moss_forward
+    pipe = moss.MOSSImagePipeline(
+        transformer=moss.MOSSImageTransformer.from_pretrained(snap, subfolder="transformer", torch_dtype=bf16).eval(),
+        scheduler=moss.MOSSImageScheduler.from_pretrained(snap, subfolder="scheduler"),
+        text_encoder=AutoModel.from_pretrained(f"{snap}/text_encoder", dtype=bf16).eval(),
+        tokenizer=AutoTokenizer.from_pretrained(f"{snap}/tokenizer"),
+        vae=AutoencoderKLFlux2.from_pretrained(snap, subfolder="vae", torch_dtype=torch.float32).eval(),
+    ).to(dev)
+    # As the model card does: rebuild the scheduler from its own config.
+    pipe.scheduler = type(pipe.scheduler).from_config(pipe.scheduler.config)
+    pipe.set_progress_bar_config(disable=True)
+    return pipe
 
 
 def f32(t):
@@ -242,10 +248,12 @@ def record_t2i_f32(run_name, latents):
     print(f"{run_name}: done", flush=True)
 
 
-with torch.no_grad():
-    record_text_encoder()
-    record_schedules()
-    lat = noise(1, 512, 512)
-    save_file({"latents": f32(lat)}, "moss_t2i_noise.safetensors")
-    record_t2i("moss_t2i", lat, prompt=PROMPTS["fox"], height=512, width=512, num_inference_steps=8)
-    record_t2i_f32("moss_t2i_f32", lat)
+if __name__ == "__main__":
+    pipe = load_pipeline(sys.argv[1])
+    with torch.no_grad():
+        record_text_encoder()
+        record_schedules()
+        lat = noise(1, 512, 512)
+        save_file({"latents": f32(lat)}, "moss_t2i_noise.safetensors")
+        record_t2i("moss_t2i", lat, prompt=PROMPTS["fox"], height=512, width=512, num_inference_steps=8)
+        record_t2i_f32("moss_t2i_f32", lat)

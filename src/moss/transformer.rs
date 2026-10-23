@@ -6,11 +6,13 @@
 //! modulation, computed from the timestep alone. Latents are tokens
 //! (1, h * w, 128), row-major, as the reference flattens them.
 
+use super::fast::Adapter;
 use crate::nn::{linear, scalar, silu, Quantize, WeightCache, Weights};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use mlx_rs::fast::scaled_dot_product_attention;
 use mlx_rs::ops::{concatenate, sigmoid, split_at_indices, tanh};
 use mlx_rs::{Array, Dtype};
+use std::collections::HashMap;
 use std::path::Path;
 
 const DIM: i32 = 3072;
@@ -28,6 +30,9 @@ const ROPE_BANDS: usize = HEAD_DIM as usize / 8;
 pub struct Transformer {
     w: Weights,
     dtype: Dtype,
+    /// With the 4-step adapter: the time embedding and both modulations'
+    /// weights and biases in f32 (see [`super::fast`]).
+    time_f32: Option<HashMap<String, Array>>,
 }
 
 /// A prompt prepared for [`Transformer::forward`] at one image size: its
@@ -59,7 +64,30 @@ impl Transformer {
             cache,
             "moss-transformer",
         )?;
-        Ok(Self { w, dtype })
+        Ok(Self {
+            w,
+            dtype,
+            time_f32: None,
+        })
+    }
+
+    /// Applies the 4-step adapter: its low-rank updates, and its f32 time
+    /// path (the base modulation weights, upcast, with the adapter's biases).
+    pub fn apply_adapter(&mut self, adapter: &Adapter) -> Result<()> {
+        for u in adapter.lora.updates(self.dtype)? {
+            self.w
+                .add_lora(&u.layer, u.down, u.up)
+                .with_context(|| format!("adapter update to {}", u.layer))?;
+        }
+        let mut time = adapter.time.clone();
+        for name in ["shared_block_modulation", "video_head_modulation"] {
+            let weight = format!("{name}.weight");
+            let w = self.w.get(&weight)?.as_dtype(Dtype::Float32)?;
+            w.eval()?;
+            time.insert(weight, w);
+        }
+        self.time_f32 = Some(time);
+        Ok(())
     }
 
     /// Adds a low-rank update to the linear layer `layer` (see
@@ -114,7 +142,11 @@ impl Transformer {
                 &modulation,
             )?;
         }
-        let x = split_at_indices(&u, &[n_img], 1)?.swap_remove(0);
+        // The image tokens, in the model dtype (the adapter's f32 residual
+        // stream is rounded here, like the reference).
+        let x = split_at_indices(&u, &[n_img], 1)?
+            .swap_remove(0)
+            .as_dtype(self.dtype)?;
         let [shift, scale]: [Array; 2] = head.try_into().expect("2 chunks");
         let x = self
             .norm(&x, "final_norm_video")?
@@ -128,7 +160,7 @@ impl Transformer {
     /// (shift, scale), from the timestep `t`.
     fn modulation(&self, t: f32) -> Result<(Vec<Array>, Vec<Array>)> {
         // Like the reference: the sinusoid in f64, the embedding in f32, the
-        // layers in the model dtype.
+        // layers in the model dtype, or all in f32 with the adapter.
         let half = FREQ_DIM / 2;
         let t = t as f64;
         let mut emb = vec![0f32; FREQ_DIM];
@@ -137,14 +169,26 @@ impl Transformer {
             emb[i] = phase.cos() as f32;
             emb[half + i] = phase.sin() as f32;
         }
-        let emb = Array::from_slice(&emb, &[1, FREQ_DIM as i32]).as_dtype(self.dtype)?;
-        let time = linear(
-            &silu(&linear(&emb, &self.w, "time_embedding.0")?)?,
-            &self.w,
+        let emb = Array::from_slice(&emb, &[1, FREQ_DIM as i32]);
+        let layer = |x: &Array, name: &str| -> Result<Array> {
+            match &self.time_f32 {
+                Some(f) => {
+                    let get = |n: &str| f.get(&format!("{name}.{n}")).context("adapter time path");
+                    Ok(x.matmul(get("weight")?.t())?.add(get("bias")?)?)
+                }
+                None => linear(x, &self.w, name),
+            }
+        };
+        let emb = match self.time_f32 {
+            Some(_) => emb,
+            None => emb.as_dtype(self.dtype)?,
+        };
+        let time = layer(
+            &silu(&layer(&emb, "time_embedding.0")?)?,
             "time_embedding.2",
         )?;
         let chunks = |name: &str, n: i32| -> Result<Vec<Array>> {
-            Ok(linear(&time, &self.w, name)?
+            Ok(layer(&time, name)?
                 .reshape(&[1, n, 1, DIM])?
                 .split_equal(n, 1)?
                 .into_iter()

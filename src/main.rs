@@ -30,6 +30,14 @@ enum ModelArg {
     /// softer fine detail; also edits with --ref-image
     #[value(name = "qwen-image-2.1-fast", alias = "qwen-fast")]
     QwenImage21Fast,
+    /// MOSS-Image-SFT: slow (50 steps with guidance); text-to-image and
+    /// img2img, best at text in images and at JSON layout prompts
+    #[value(name = "moss-image", alias = "moss")]
+    MossImage,
+    /// MOSS-Image-SFT in 4 steps (rapid-moss adapter): text-to-image ~25x
+    /// faster, without guidance
+    #[value(name = "moss-image-fast", alias = "moss-fast")]
+    MossImageFast,
 }
 
 impl ModelArg {
@@ -38,6 +46,8 @@ impl ModelArg {
             Self::ZImageTurbo => Model::ZImageTurbo,
             Self::QwenImage21 => Model::QwenImage21,
             Self::QwenImage21Fast => Model::QwenImage21Fast,
+            Self::MossImage => Model::MossImage,
+            Self::MossImageFast => Model::MossImageFast,
         }
     }
 }
@@ -218,15 +228,16 @@ struct Args {
     strength: Option<f64>,
 
     /// Number of inference steps [default: 9 for z-image-turbo, 40 for
-    /// qwen-image-2.1; qwen-image-2.1-fast always runs 4].
+    /// qwen-image-2.1, 50 for moss-image; qwen-image-2.1-fast always runs 4].
     #[arg(long)]
     num_steps: Option<usize>,
 
     /// Classifier-free guidance, as each model's reference pipeline defines
     /// it. z-image-turbo: on above 0 (default 0), against --negative-prompt or
     /// the empty prompt. qwen-image-2.1: on above 1 (default 1) with
-    /// --negative-prompt. qwen-image-2.1-fast: none. Guidance runs the model
-    /// twice per step.
+    /// --negative-prompt. qwen-image-2.1-fast: none. moss-image: on unless 1
+    /// (default 3), against --negative-prompt or the empty prompt. Guidance
+    /// runs the model twice per step.
     #[arg(long)]
     guidance_scale: Option<f64>,
 
@@ -250,7 +261,8 @@ struct Args {
     #[arg(long, requires = "quantize")]
     no_cache: bool,
 
-    /// Add a LoRA trained for the model (z-image-turbo or Qwen-Image-2.1): a
+    /// Add a LoRA trained for the model (z-image-turbo, Qwen-Image-2.1 or
+    /// MOSS-Image): a
     /// .safetensors file, with an optional strength, e.g. --lora
     /// style.safetensors:0.8 [default: 1]. Repeat for several; their effects
     /// add up. Applies to every image of a batch.
@@ -261,7 +273,8 @@ struct Args {
     #[arg(long)]
     model_path: Option<String>,
 
-    /// Output image filename [default: z_image_output.png or qwen_image_output.png].
+    /// Output image filename [default: z_image_output.png, qwen_image_output.png
+    /// or moss_image_output.png].
     #[arg(long, conflicts_with = "input")]
     output: Option<String>,
 
@@ -573,6 +586,7 @@ fn default_output(args: &Args) -> PathBuf {
         (None, Model::QwenImage21 | Model::QwenImage21Fast) => {
             PathBuf::from("qwen_image_output.png")
         }
+        (None, Model::MossImage | Model::MossImageFast) => PathBuf::from("moss_image_output.png"),
     }
 }
 
@@ -938,8 +952,12 @@ fn run(args: Args) -> Result<()> {
 fn generate(pipeline: &Pipeline, job: &Job, encoded: &Encoded) -> Result<()> {
     let out = pipeline.generate_encoded_with(&job.options()?, encoded, |p| match p {
         Progress::Encoded { tokens } => {
-            let cut = job.model == Model::ZImageTurbo
-                && tokens >= mixel::zimage::pipeline::MAX_PROMPT_TOKENS;
+            let limit = match job.model {
+                Model::ZImageTurbo => Some(mixel::zimage::pipeline::MAX_PROMPT_TOKENS),
+                Model::MossImage | Model::MossImageFast => Some(mixel::moss::MAX_PROMPT_TOKENS),
+                Model::QwenImage21 | Model::QwenImage21Fast => None,
+            };
+            let cut = limit.is_some_and(|limit| tokens >= limit);
             let note = if cut {
                 " (the limit; the rest of the prompt is ignored)"
             } else {
@@ -1548,6 +1566,16 @@ not json
             args(&["--model", "qwen-fast"]).model(),
             Model::QwenImage21Fast
         );
+        assert_eq!(args(&["--model", "moss-image"]).model(), Model::MossImage);
+        assert_eq!(args(&["--model", "moss"]).model(), Model::MossImage);
+        assert_eq!(
+            args(&["--model", "moss-image-fast"]).model(),
+            Model::MossImageFast
+        );
+        assert_eq!(
+            args(&["--model", "moss-fast"]).model(),
+            Model::MossImageFast
+        );
         assert!(Args::try_parse_from(["candy", "--model", "sdxl"]).is_err());
     }
 
@@ -1562,6 +1590,16 @@ not json
         let job = single_job(&args(&["--model", "qwen-fast", "--seed", "1"])).unwrap();
         assert_eq!((job.num_steps, job.guidance_scale), (4, 1.0));
         assert_eq!(job.output, PathBuf::from("qwen_image_output.png"));
+    }
+
+    #[test]
+    fn moss_uses_its_own_defaults() {
+        let job = single_job(&args(&["--model", "moss", "--seed", "1"])).unwrap();
+        assert_eq!((job.num_steps, job.guidance_scale), (50, 3.0));
+        assert_eq!(job.output, PathBuf::from("moss_image_output.png"));
+        let job = single_job(&args(&["--model", "moss-fast", "--seed", "1"])).unwrap();
+        assert_eq!((job.num_steps, job.guidance_scale), (4, 1.0));
+        assert_eq!(job.output, PathBuf::from("moss_image_output.png"));
     }
 
     #[test]

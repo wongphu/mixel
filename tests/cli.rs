@@ -550,3 +550,76 @@ fn qwen_generates_and_edits() {
     assert!(text(&out.stderr).contains("does not take reference images"));
     assert!(!text(&out.stdout).contains("Loading"));
 }
+
+#[test]
+fn moss_fast_rejects_init_images_before_loading() {
+    let dir = tempfile::tempdir().unwrap();
+    image::RgbImage::new(64, 64)
+        .save(dir.path().join("in.png"))
+        .unwrap();
+    let out = mixel(
+        &[
+            "--model",
+            "moss-fast",
+            "--prompt",
+            "x",
+            "--init-image",
+            "in.png",
+            "--seed",
+            "1",
+        ],
+        dir.path(),
+    );
+    assert!(!out.status.success());
+    assert!(text(&out.stderr).contains("can't start from an init image"));
+    assert!(!text(&out.stdout).contains("Loading"));
+}
+
+#[test]
+#[ignore = "needs the ~25 GB MOSS-Image-SFT weights and a GPU; run with --ignored"]
+fn moss_generates_reproducibly_in_both_variants() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |model: &str, extra: &[&str], output: &str| {
+        let args = [
+            &[
+                "--model",
+                model,
+                "--prompt",
+                "a red apple",
+                "--seed",
+                "3",
+                "--width",
+                "256",
+                "--height",
+                "192",
+                "--output",
+                output,
+            ][..],
+            extra,
+        ]
+        .concat();
+        let out = mixel(&args, dir.path());
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        assert_eq!(
+            image::image_dimensions(dir.path().join(output)).unwrap(),
+            (256, 192)
+        );
+        std::fs::read(dir.path().join(output)).unwrap()
+    };
+    let a = run("moss-image", &["--num-steps", "2"], "a.png");
+    assert_eq!(a, run("moss-image", &["--num-steps", "2"], "a2.png"));
+    run(
+        "moss-image",
+        &[
+            "--num-steps",
+            "4",
+            "--init-image",
+            "a.png",
+            "--strength",
+            "0.5",
+        ],
+        "b.png",
+    );
+    let c = run("moss-image-fast", &[], "c.png");
+    assert_ne!(c, run("moss-image-fast", &["--num-steps", "2"], "d.png"));
+}
