@@ -56,9 +56,11 @@ impl Scheduler {
     }
 }
 
-/// `torch.linspace` for f32: the first half counts up from `start`, the
-/// second down from `end`, so both ends are exact.
-fn linspace(start: f32, end: f32, n: usize) -> Vec<f32> {
+/// `torch.linspace` for f32 on the CPU: the first half counts up from
+/// `start`, the second down from `end`, so both ends are exact. Each value is
+/// one fused multiply-add, as torch's kernel compiles on Apple Silicon (for
+/// MOSS-Image's 1000 training sigmas, separate roundings differ in 239).
+pub(crate) fn linspace(start: f32, end: f32, n: usize) -> Vec<f32> {
     if n == 1 {
         return vec![start];
     }
@@ -66,9 +68,9 @@ fn linspace(start: f32, end: f32, n: usize) -> Vec<f32> {
     (0..n)
         .map(|i| {
             if i < n / 2 {
-                start + step * i as f32
+                step.mul_add(i as f32, start)
             } else {
-                end - step * (n - 1 - i) as f32
+                (-step).mul_add((n - 1 - i) as f32, end)
             }
         })
         .collect()

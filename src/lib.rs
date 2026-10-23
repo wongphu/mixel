@@ -14,7 +14,9 @@
 //!
 //! [`zimage`] and [`qwen21`] hold the models themselves for lower-level use.
 
+mod autoencoder_kl;
 pub mod lora;
+pub mod moss;
 pub mod nn;
 mod pipeline;
 pub mod qwen21;
