@@ -1,21 +1,25 @@
 # mixel
 
 Text-to-image and image editing on Apple Silicon with
-[mlx-rs](https://github.com/oxiglade/mlx-rs) (Rust bindings to MLX), for two models, one of
-them also in a 4-step variant:
+[mlx-rs](https://github.com/oxiglade/mlx-rs) (Rust bindings to MLX), for three models, two
+of them also in 4-step variants:
 
 | `--model` | Model | Default steps | 1024×1024 image | Can do |
 |---|---|---:|---:|---|
 | `z-image-turbo` (default) | [Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | 9 | ~59 s | text-to-image, img2img, [LoRAs](#loras) |
 | `qwen-image-2.1` | [Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1) | 40 | ~6 min | text-to-image, img2img, **editing with reference images** |
 | `qwen-image-2.1-fast` | Qwen-Image-2.1 + [4-step Fun-Acc LoRA](https://huggingface.co/alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs) | 4 (fixed) | ~38 s | the same, slightly softer fine detail |
+| `moss-image` | [MOSS-Image-SFT](https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT) | 50 | ~13 min | text-to-image, img2img, **[text in images, JSON layouts](#moss-image-text-in-images-and-layouts)** |
+| `moss-image-fast` | MOSS-Image-SFT + [4-step rapid-moss adapter](https://huggingface.co/darask0/MOSS-Image_4-step_adapter_lora) | 4 | ~28 s | text-to-image |
 
 Times are medians from the [reference benchmark](benchmarks/) on an M3 Max (30-core GPU,
 96 GB), with the weights already in memory; an edit with a ~1024×1024 reference image takes
-~8 min (40 steps) or ~58 s (4 steps). Memory figures count GB as Apple does (2^30 bytes).
-Both are ports: Z-Image of
-candle-transformers' `z_image` (`src/zimage/`), Qwen-Image-2.1 of the diffusers pipeline and
-transformers' Qwen3-VL (`src/qwen21/`). The CLI, JSONL batch mode and seeding match
+~8 min (40 steps) or ~58 s (4 steps). MOSS-Image's were measured the same way on the same
+Mac, outside a full benchmark run (the 50-step time from a single run). Memory figures count
+GB as Apple does (2^30 bytes). All three are ports: Z-Image of candle-transformers' `z_image`
+(`src/zimage/`), Qwen-Image-2.1 of the diffusers pipeline and transformers' Qwen3-VL
+(`src/qwen21/`), MOSS-Image of the pipeline bundled with its weights and transformers'
+Qwen3.5 (`src/moss/`). The CLI, JSONL batch mode and seeding match
 [`candy`](https://github.com/wongphu/candle-diffusion), the candle version, but Z-Image
 sampling follows diffusers, so the same seed gives a slightly different image
 ([details](#z-image-sampling-follows-diffusers)).
@@ -25,18 +29,22 @@ cargo install --path .
 mixel --prompt "A cute robot holding a candle" --seed 42
 mixel --model qwen-image-2.1 --prompt "A capybara wearing a wizard hat, oil painting" --seed 1
 mixel --model qwen-fast --ref-image fox.png --prompt "Turn the fox into a gray wolf" --seed 1
+mixel --model moss-fast --prompt 'A shop window, a hand-painted sign reads "MIXEL BOOKS"' --seed 1
 ```
 
 - Or download a ready-made `mixel` for macOS 14 or later from
   [Releases](https://github.com/wongphu/mixel/releases), and keep `mlx.metallib` next to it.
 - The first run downloads the weights to `~/.cache/huggingface`: ~33 GB for Z-Image-Turbo
-  (shared with `candy`), ~31 GB for Qwen-Image-2.1, plus 0.35 GB for the 4-step adapter.
+  (shared with `candy`), ~31 GB for Qwen-Image-2.1 (plus 0.35 GB for its 4-step adapter),
+  ~25 GB for MOSS-Image-SFT (plus 1.2 GB for its 4-step adapter).
 - Without `--seed`, a random seed is used and added to the filename (`z_image_output-1234567.png`).
-- Width/height must be multiples of 16 (Z-Image) or 32 (Qwen-Image). `--model-path <dir>`
-  uses local weights (the 4-step adapter still comes from the Hugging Face cache).
+- Width/height must be multiples of 16 (Z-Image, MOSS-Image) or 32 (Qwen-Image).
+  `--model-path <dir>` uses local weights (the 4-step adapters still come from the Hugging
+  Face cache).
 - Each run prints a timing breakdown: text encoding, init image, denoising, VAE.
-- A 1024×1024 image needs ~14 GB of memory with Z-Image-Turbo and ~17 GB with Qwen-Image-2.1;
-  [`--quantize 4`](#less-memory-8--and-4-bit-weights) brings that down to 5.4 and 7.5 GB.
+- A 1024×1024 image needs ~14 GB of memory with Z-Image-Turbo, ~17 GB with Qwen-Image-2.1
+  and ~15 GB with MOSS-Image; [`--quantize 4`](#less-memory-8--and-4-bit-weights) brings that
+  down to 5.4, 7.5 and 6.9 GB.
 - Please [benchmark your Mac](#benchmark-your-mac) and send us the report.
 
 ## For AI agents and scripts
@@ -82,6 +90,46 @@ is the step count.
 - Like the reference, the rank-64 updates run as separate low-rank matmuls. They are only
   ~0.2% of the weights, so merging them into bf16 weights would round away 40–60% of each.
 
+## MOSS-Image: text in images and layouts
+
+```bash
+mixel --model moss-fast --seed 1 --prompt 'A bakery window at dawn. A hand-painted sign reads "FRESH BREAD", and a chalkboard below it says in Chinese: "今日新鲜出炉"'
+mixel --model moss --seed 1 --width 1024 --height 1024 --prompt "$(cat layout.json)"
+```
+
+[MOSS-Image-SFT](https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT) (OpenMOSS, Apache-2.0)
+pairs a 4.7B single-stream transformer with Qwen3.5-9B as its text encoder. It renders
+quoted English and Chinese text well, and takes natural language, tag lists, or a
+[JSON layout](https://github.com/OpenMOSS/MOSS-Image/blob/main/USERGUIDE.md#layout-prompts-experimental)
+that places text and objects by bounding box (pass it as the prompt, compact as
+`json.dumps` writes it, with the layout's canvas size as `--width`/`--height`). In a test
+layout with `moss-image-fast`, a title, an object and a caption each landed in their boxes;
+the small caption's text came out misspelled ("Silizon" for "Silicon").
+
+- `moss-image` runs like the reference pipeline: 50 steps, guidance 3 against
+  `--negative-prompt` or the empty prompt, the negative branch skipping one transformer
+  block (the authors' default). Each step runs the transformer twice: a 1024×1024 image
+  takes ~13 min on the M3 Max (15.4 s per step). `--guidance-scale 1` turns guidance off and
+  halves that. img2img works the way it does for the other models; the official pipeline has none.
+- `moss-image-fast` (or `moss-fast`) adds darask0's community
+  [rapid-moss adapter](https://huggingface.co/darask0/MOSS-Image_4-step_adapter_lora),
+  distilled from MOSS-Image-SFT with data-space DMD and DMAD: 4 steps without guidance,
+  ~28 s per 1024×1024 image. `--num-steps` 1–3 runs a shorter prefix (each was trained;
+  their image quality isn't checked here). Its sampler predicts the image from one fixed
+  noise at four fixed time codes, without a noise schedule, so it can't start from
+  `--init-image`; guidance and negative prompts are rejected too. mixel uses the adapter at the revision it was checked
+  against.
+- The adapter adds rank-128 updates to every block's projections, run unmerged (merged into
+  bf16 weights, most of each would round away), and replaces the time embedding and the two
+  modulation biases with f32 ones, which keeps the residual stream in f32. The updates
+  run in bf16, as in the authors' training code: in f32, as their `inference.py` does,
+  a step took 25% longer for the same agreement with it.
+- Prompts can be up to 4096 tokens; longer ones are cut, and the run says so. The authors
+  recommend 1–2 megapixels; sizes are multiples of 16.
+- Three of every four layers of the Qwen3.5 text encoder are Gated DeltaNet linear
+  attention, ported in plain MLX ops (`src/moss/gated_delta.rs`): the sequence in chunks of
+  64 tokens, as transformers does it.
+
 ## Image to image
 
 Start from an existing image instead of pure noise:
@@ -90,9 +138,10 @@ Start from an existing image instead of pure noise:
 mixel --init-image photo.jpg --prompt "A gray wolf sitting in fresh snow" --strength 0.75 --seed 7
 ```
 
-- Works with both models. `--strength` in (0, 1] is the fraction of denoising steps that
-  run (like diffusers): with 9 steps, 0.6 runs 6 and 0.75 runs 7. Low values stay close to the image, 1.0
-  ignores its content and equals plain text-to-image with the same seed. Default 0.6.
+- Works with every model except `moss-image-fast`. `--strength` in (0, 1] is the fraction
+  of denoising steps that run (like diffusers): with 9 steps, 0.6 runs 6 and 0.75 runs 7.
+  Low values stay close to the image, 1.0 ignores its content and equals plain text-to-image
+  with the same seed. Default 0.6.
 - Without `--width`/`--height`, the output keeps the image's aspect ratio (multiples of 16
   or 32, longest side at most 1024). With explicit sizes, the image is center-cropped to fill.
 - JSONL lines take `init_image` (relative to the JSONL file) and `strength`.
@@ -111,8 +160,8 @@ mixel --quantize 4 --model qwen-fast --ref-image fox.png --prompt "Turn the fox 
 `--quantize 8` or `--quantize 4` stores the large layers of the text encoder and the
 transformer (their attention and MLP projections) in 8 or 4 bits as they load, with MLX's
 affine quantization (a scale and bias per 64 weights). The embeddings, norms, modulation
-layers and the VAE stay in bf16, Qwen's vision encoder in f32. The files on disk don't
-change. Peak memory, measured as the process footprint on the M3 Max:
+layers and the VAE stay in bf16 (MOSS-Image's VAE in f32, as its reference runs it), Qwen's
+vision encoder in f32. The files on disk don't change. Peak memory, measured as the process footprint on the M3 Max:
 
 | | bf16 | `--quantize 8` | `--quantize 4` |
 |---|---:|---:|---:|
@@ -120,6 +169,7 @@ change. Peak memory, measured as the process footprint on the M3 Max:
 | Z-Image-Turbo, 1024×1024 | 13.5 GB | 8.3 GB | **5.4 GB** |
 | Qwen-Image-2.1 (40 or 4 steps), 1024×1024 | 17.0 GB | 10.9 GB | **7.5 GB** |
 | Qwen-Image-2.1, edit with a ~1024×1024 image | 18.3 GB | 12.2 GB | **9.0 GB** |
+| MOSS-Image (50 or 4 steps), 1024×1024 | 15.1 GB | 9.2 GB | **6.9 GB** |
 
 **What runs well where.** The GPU may only use part of a Mac's memory (its working set:
 81% on this 96 GB Mac, 74% or 11.8 GB on a 16 GB M4), and a model that needs more runs 2–3×
@@ -134,7 +184,8 @@ slower. Measured with mixel 0.5.0 on a [16 GB Mac mini](benchmarks/) (M4, 10-cor
 | Z-Image-Turbo, bf16 (over the working set) | 13.4 GB | 197–530 s | ~36 s | 17 s |
 
 So on 16 GB, use `--quantize 8` for Z-Image-Turbo (as fast as 4 bits there, and practically
-the bf16 images) and `--quantize 4` for Qwen-Image-2.1. An 8 GB Mac (~5.3 GB working set)
+the bf16 images) and `--quantize 4` for Qwen-Image-2.1. MOSS-Image hasn't been timed on the
+Mac mini yet; at 8 bits (9.2 GB) or 4 bits (6.9 GB) it fits the working set. An 8 GB Mac (~5.3 GB working set)
 is borderline even at 4 bits; 32 GB and up runs everything in bf16.
 
 - **8 bits gives practically the same images.** Each stage stays within 1–2% of bf16, about
@@ -147,12 +198,14 @@ is borderline even at 4 bits; 32 GB and up runs everything in bf16.
 - **Both are slower per step**, as MLX's quantized matmuls unpack the weights as they go: in
   the [reference benchmark](benchmarks/), a 1024×1024 Z-Image-Turbo step takes 7.7 s at 8
   bits and 7.9 s at 4 against 6.3 s in bf16, and a 4-step Qwen-Image-2.1 step 10.3 s at 4
-  bits against 8.7 s (an edit 11.7 against 10.5). In mixel 0.5.0, large inputs (a
+  bits against 8.7 s (an edit 11.7 against 10.5). A 4-step MOSS-Image step takes 6.5 s at 8
+  bits and 7.2 s at 4 against 6.4 s (run in that order, so the later ones on a warmer Mac).
+  In mixel 0.5.0, large inputs (a
   1024×1024 image's ~4100 tokens) run as a bf16 matmul on the unpacked weights instead, 4–6%
   slower than bf16 per matmul rather than 8–13%: on the Mac mini, quantized steps got 5–7%
   faster than in 0.4.1, with the same images.
 - **The quantized weights are saved after the first run**, to `~/.cache/mixel/weights` (6.0
-  GB for Z-Image-Turbo at 4 bits, 8.7 GB for Qwen-Image-2.1), and later runs load them
+  GB for Z-Image-Turbo at 4 bits, 8.7 GB for Qwen-Image-2.1, 8.3 GB for MOSS-Image), and later runs load them
   instead of reading the full-precision files (33 GB for Z-Image-Turbo, including a 24.6 GB
   f32 transformer) and quantizing them again. On the M3 Max a warm load takes ~1 s instead
   of ~3.5 s; a Mac with less memory, which can't keep the source files in its file cache,
@@ -168,8 +221,8 @@ With or without `--quantize`, mixel keeps memory down three more ways. A 1024×1
 Z-Image-Turbo image peaked at 36 GB in mixel 0.3, and a Qwen-Image-2.1 edit at 65 GB.
 
 - **The text encoders are never in memory with the transformer.** They run once per image,
-  at the start, yet are a third (Z-Image-Turbo) to half (Qwen-Image-2.1, with its vision
-  encoder) of the weights. mixel loads them, encodes every prompt of the run (a JSONL batch
+  at the start, yet are a third (Z-Image-Turbo) to over half (Qwen-Image-2.1 with its vision
+  encoder, MOSS-Image) of the weights. mixel loads them, encodes every prompt of the run (a JSONL batch
   in chunks of up to 512 MB of encodings, ~0.3 MB per prompt or ~10 MB per edit), frees
   them, then loads the transformer and VAE. The images are the same bit for bit, at the
   same speed.
@@ -186,8 +239,8 @@ mixel --model qwen-fast --lora doodle_in_lora_qwen21.safetensors --ref-image scr
       --prompt "<doodle> Turn the magenta scribble into a black top hat."
 ```
 
-- `--lora FILE[:SCALE]` adds a LoRA trained for the model (Z-Image-Turbo, or
-  Qwen-Image-2.1 for both Qwen variants) to its transformer, at its trained strength by
+- `--lora FILE[:SCALE]` adds a LoRA trained for the model (Z-Image-Turbo, Qwen-Image-2.1
+  for both Qwen variants, or MOSS-Image-SFT for both MOSS ones) to its transformer, at its trained strength by
   default (1). Repeat it for several; their effects add up. It applies to every image of a
   run, in bf16 or quantized: the low-rank updates run next to the weights instead of being
   merged into them, where bf16 would round much of them away and 4-bit weights couldn't
@@ -210,6 +263,12 @@ mixel --model qwen-fast --lora doodle_in_lora_qwen21.safetensors --ref-image scr
   The 4-step adapter itself isn't a `--lora`: mixel says to use `qwen-image-2.1-fast`.
   Speed-up LoRAs for other step counts (Turbo8, Viggle's 4–8-step ones) expect their own
   step schedules, which mixel doesn't have; they're untested here.
+- MOSS-Image LoRAs in ComfyUI's or diffusers' layout load as they are, with the base model
+  or the 4-step one: with [an anime-style LoRA](https://huggingface.co/axiomofmind/Moss-image-anime-lora)
+  (all 252 layers) on `moss-image-fast` its style shows, and at scale 0 the image is the
+  same, bit for bit. mixel refuses the 4-step adapter's own `lora.safetensors` (and the
+  8-step one's) as `--lora`: the adapter also replaces the time embedding and the sampler,
+  which only `moss-image-fast` does.
 - In the library: `LoadOptions::loras`, a `Vec<mixel::Lora>`.
 
 ## As a library
@@ -253,7 +312,7 @@ load(Parts::Generator)?.generate_encoded(&opts, &encoded)?.image.save("fox-4bit.
 The library prints nothing and writes no files (unless `LoadOptions::weight_cache` is set);
 the `mixel` command adds the CLI, JSONL batching, seed-in-filename naming, saving, and the
 weight cache in `~/.cache/mixel`. The models themselves are in
-`mixel::zimage` and `mixel::qwen21` for lower-level use.
+`mixel::zimage`, `mixel::qwen21` and `mixel::moss` for lower-level use.
 
 ## Batch mode (JSONL)
 
@@ -280,13 +339,13 @@ We're collecting mixel timings across Macs. If you can spare the time, run:
 
 ```bash
 scripts/benchmark.sh --dry-run   # what would run, and download, on this Mac
-scripts/benchmark.sh             # run it: ~65 min on an M3 Max
+scripts/benchmark.sh             # run it: ~80 min on an M3 Max
 ```
 
 It runs each test that fits in your GPU's working set: Z-Image-Turbo at 512×512 and
-1024×1024 (also in 8 and 4 bits), and Qwen-Image-2.1 in 4 and 40 steps, text-to-image and an
-edit (the 4-step ones also in 4 bits). A 16 GB Mac runs the quantized tests, a 32 GB one
-all of them. It asks before downloading weights. The result is one file,
+1024×1024 (also in 8 and 4 bits), Qwen-Image-2.1 in 4 and 40 steps, text-to-image and an
+edit (the 4-step ones also in 4 bits), and MOSS-Image in 4 steps (also in 4 bits) and 50.
+A 16 GB Mac runs the quantized tests, a 32 GB one all of them. It asks before downloading weights. The result is one file,
 `mixel-benchmark-<chip>-<gpu>-<memory>-<version>-<date>.md`, labelled with your Mac, chip,
 CPU and GPU cores, memory, macOS version and power source, with a table to read and a JSON
 block for us to compile.
@@ -382,6 +441,35 @@ example measures this), so the ~1% gap between two bf16 implementations grows. O
 diffusers rounds the latents back to bf16 after each step (a workaround for an old PyTorch
 bug); the adapter expects them in f32, as on CUDA, so the script turns that off.
 
+## MOSS-Image: accuracy
+
+**Checked against the reference.** `scripts/make_moss_reference.py` runs the pipeline
+bundled with the weights (`pipeline_moss_image.py`) and transformers' Qwen3.5, and records
+every stage; `cargo run --release --example moss_parity -- <dir>` feeds each stage of this
+port the same inputs. Relative L2 error (bf16): token ids identical, the Gated DeltaNet
+kernel 8.5e-5, text embeddings 1.5–2.4% (the example prints every layer's), transformer step
+0.9–2.5%, scheduler sigmas bit for bit, VAE decode 7.6e-7 and encode 4.0e-6 (both in f32).
+A full 8-step run with guidance ends 41% off: guidance 3 amplifies each large step's
+rounding, and the gap grows from 0.1% after the first step. With the transformer in f32 on
+both sides the same run ends 0.06% apart, so the rest is rounding.
+
+**The 4-step variant.** `scripts/make_moss_fast_reference.py` applies the adapter with its
+authors' own code; `cargo run --release --example moss_fast_parity -- <dir>` checks this port
+against it. In f32 the first step agrees to 2.5e-5 and the four steps end 0.17% apart. In
+bf16 the adapted model amplifies rounding much more than the base model: the reference's own
+bf16 run is 11% off its f32 run after one step and 28% after four, and mixel's bf16 run
+ends 23% from the reference's.
+
+**Two PyTorch details on Macs.** torch's `linspace` on the CPU rounds each value once (a
+fused multiply-add) on Apple Silicon, and mixel's scheduler now does too: with separate
+roundings, 239 of MOSS-Image's 1000 training sigmas were an ulp off, and with them the
+snapped schedules. Z-Image's pipeline uses the same `linspace`, so its schedule now matches
+diffusers' bit for bit at every step count too: before, it was an ulp off at most counts
+from 13 steps up (20 included), so such images differ very slightly from mixel 0.6.0's for
+the same seed. At 9 steps, the default, nothing changes. And the MOSS transformer computes
+its timestep sinusoid in float64, which PyTorch's MPS backend lacks, so the reference script
+runs just that part on the CPU.
+
 ## Tests
 
 ```bash
@@ -398,6 +486,10 @@ python scripts/make_qwen21_reference.py <qwen-snapshot-dir> fox.png
 cargo run --release --example qwen21_parity -- . fox.png
 python scripts/make_qwen21_fast_reference.py <qwen-snapshot-dir> fox.png
 cargo run --release --example qwen21_fast_parity -- .
+python scripts/make_moss_reference.py <moss-snapshot-dir>
+cargo run --release --example moss_parity -- .
+python scripts/make_moss_fast_reference.py <moss-snapshot-dir>
+cargo run --release --example moss_fast_parity -- .
 ```
 
 The PyTorch scripts need torch, torchvision, transformers >= 5 and diffusers >= 0.41; until
@@ -405,7 +497,10 @@ The PyTorch scripts need torch, torchvision, transformers >= 5 and diffusers >= 
 need the whole Qwen-Image-2.1 snapshot (`hf download Qwen/Qwen-Image-2.1`; mixel itself only
 fetches the files it uses, without `model_index.json` and the configs), and `fox.png` must be
 512×512, the size the scripts run the edit at. Last run 2026-10-02 (torch 2.14.1, diffusers
-main at 578c9b2): every stage within the numbers above.
+main at 578c9b2): every stage within the numbers above. The MOSS ones need diffusers >= 0.38,
+transformers >= 5.3 (for Qwen3.5) and the whole MOSS-Image-SFT snapshot (`hf download
+OpenMOSS-Team/MOSS-Image-SFT`); last run 2026-10-23 (torch 2.14.1, diffusers 0.42.0,
+transformers 5.20.2).
 
 ## Building
 
@@ -426,10 +521,11 @@ so on an M5 a local build may be faster.
 ## License
 
 MIT, see [LICENSE](LICENSE). The Z-Image code is ported from candle-transformers
-(MIT/Apache-2.0). The Qwen-Image-2.1 code is ported from diffusers and transformers
-(Apache-2.0, see [LICENSE-APACHE](LICENSE-APACHE)).
+(MIT/Apache-2.0). The Qwen-Image-2.1 code is ported from diffusers and transformers, the
+MOSS-Image code from the pipeline bundled with its weights and from transformers (all
+Apache-2.0, see [LICENSE-APACHE](LICENSE-APACHE)).
 
 The model weights have their own licenses, which you accept when downloading them.
 In particular, **Qwen-Image-2.1's weights, and the 4-step adapter's, are under the Qwen
 Research License: research and evaluation only, not commercial use** without a separate
-license from Qwen.
+license from Qwen. MOSS-Image-SFT's weights and the rapid-moss adapter are Apache-2.0.

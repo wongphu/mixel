@@ -6,8 +6,8 @@ use super::{
 };
 use crate::lora::Lora;
 use crate::pipeline::{
-    resize_to_fill, seeded_noise, to_rgb_image, GenerateOptions, Generated, Parts, Progress,
-    Timings,
+    image_to_array, resize_to_fill, seeded_noise, to_rgb_image, GenerateOptions, Generated, Parts,
+    Progress, Timings,
 };
 use anyhow::{Context, Error as E, Result};
 use mlx_rs::{Array, Dtype};
@@ -34,6 +34,8 @@ pub struct Encoded {
     neg: Option<Array>,
     /// Prompt tokens (at most [`MAX_PROMPT_TOKENS`]).
     pub tokens: usize,
+    /// Whether the prompt was cut to [`MAX_PROMPT_TOKENS`].
+    pub truncated: bool,
     pub took: Duration,
 }
 
@@ -121,7 +123,7 @@ impl ZImagePipeline {
     /// prompt's. Needs the text encoder.
     pub fn encode(&self, opts: &GenerateOptions) -> Result<Encoded> {
         let started = Instant::now();
-        let (cap, tokens) = self.encode_prompt(&opts.prompt)?;
+        let (cap, tokens, truncated) = self.encode_prompt(&opts.prompt)?;
         // Like diffusers, guidance runs whenever the scale is positive, against
         // the negative prompt or, without one, the empty prompt.
         let neg = if opts.guidance_scale > 0.0 {
@@ -133,6 +135,7 @@ impl ZImagePipeline {
             cap,
             neg,
             tokens,
+            truncated,
             took: started.elapsed(),
         })
     }
@@ -229,38 +232,31 @@ impl ZImagePipeline {
         width: usize,
         height: usize,
     ) -> Result<Array> {
-        let (w, h) = (width as u32, height as u32);
-        let img = resize_to_fill(img, w, h);
-        // [0, 255] -> [-1, 1], NHWC.
-        let pixels: Vec<f32> = img
-            .as_raw()
-            .iter()
-            .map(|&p| p as f32 / 127.5 - 1.0)
-            .collect();
-        let x = Array::from_slice(&pixels, &[1, h as i32, w as i32, 3]).as_dtype(self.dtype)?;
+        let img = resize_to_fill(img, width as u32, height as u32);
+        let x = image_to_array(&img).as_dtype(self.dtype)?;
         let z = vae.encode(&x)?.transpose_axes(&[0, 3, 1, 2])?;
         z.eval()?;
         Ok(z)
     }
 
-    /// Caption features (1, tokens, 2560) and the token count.
-    fn encode_prompt(&self, prompt: &str) -> Result<(Array, usize)> {
+    /// Caption features (1, tokens, 2560), the token count, and whether the
+    /// prompt was cut to [`MAX_PROMPT_TOKENS`].
+    fn encode_prompt(&self, prompt: &str) -> Result<(Array, usize, bool)> {
         let text_encoder = self
             .text_encoder
             .as_ref()
             .context("this pipeline was loaded without its text encoder")?;
-        let tokens = self
+        let mut tokens = self
             .tokenizer
             .encode(format_prompt_for_qwen3(prompt).as_str(), true)
             .map_err(E::msg)?
             .get_ids()
-            .iter()
-            .copied()
-            .take(MAX_PROMPT_TOKENS)
-            .collect::<Vec<_>>();
+            .to_vec();
+        let truncated = tokens.len() > MAX_PROMPT_TOKENS;
+        tokens.truncate(MAX_PROMPT_TOKENS);
         let feats = text_encoder.forward(&tokens)?;
         feats.eval()?;
-        Ok((feats, tokens.len()))
+        Ok((feats, tokens.len(), truncated))
     }
 }
 
@@ -290,7 +286,7 @@ mod tests {
 
     #[test]
     fn guidance_pushes_away_from_the_negative_prediction() {
-        crate::nn::test_device();
+        let _mlx = crate::nn::test_device();
         let pos = Array::from_slice(&[1.0f32, 2.0], &[2]);
         let neg = Array::from_slice(&[0.5f32, 3.0], &[2]);
         let at = |scale: f32| {

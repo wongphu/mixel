@@ -1,6 +1,7 @@
 //! The end-to-end text-to-image pipeline.
 
 use crate::lora::Lora;
+use crate::moss::pipeline::MossPipeline;
 use crate::nn::{ModelFiles, Quantize, WeightCache};
 use crate::qwen21::pipeline::QwenPipeline;
 use crate::zimage::pipeline::ZImagePipeline;
@@ -28,13 +29,21 @@ pub enum Model {
     /// Qwen-Image-2.1 with the 4-step Fun-Acc adapter ([`crate::qwen21::fast`]):
     /// the same tasks 7-10x faster, with slightly softer fine detail.
     QwenImage21Fast,
+    /// MOSS-Image-SFT: slow (50 steps with guidance), text-to-image and
+    /// img2img, strongest at rendering text and following JSON layouts.
+    MossImage,
+    /// MOSS-Image-SFT with the 4-step rapid-moss adapter
+    /// ([`crate::moss::fast`]): text-to-image ~25x faster.
+    MossImageFast,
 }
 
 impl Model {
-    pub const ALL: [Model; 3] = [
+    pub const ALL: [Model; 5] = [
         Model::ZImageTurbo,
         Model::QwenImage21,
         Model::QwenImage21Fast,
+        Model::MossImage,
+        Model::MossImageFast,
     ];
 
     /// Short name, as used on the command line.
@@ -43,15 +52,19 @@ impl Model {
             Model::ZImageTurbo => "z-image-turbo",
             Model::QwenImage21 => "qwen-image-2.1",
             Model::QwenImage21Fast => "qwen-image-2.1-fast",
+            Model::MossImage => "moss-image",
+            Model::MossImageFast => "moss-image-fast",
         }
     }
 
-    /// Hugging Face repo of the weights (the fast variant also downloads
-    /// its adapter from [`crate::qwen21::fast::REPO`]).
+    /// Hugging Face repo of the weights (the fast variants also download
+    /// their adapters, from [`crate::qwen21::fast::REPO`] and
+    /// [`crate::moss::fast::REPO`]).
     pub fn repo(self) -> &'static str {
         match self {
             Model::ZImageTurbo => DEFAULT_REPO,
             Model::QwenImage21 | Model::QwenImage21Fast => crate::qwen21::REPO,
+            Model::MossImage | Model::MossImageFast => crate::moss::REPO,
         }
     }
 
@@ -60,16 +73,19 @@ impl Model {
             Model::ZImageTurbo => DEFAULT_STEPS,
             Model::QwenImage21 => crate::qwen21::DEFAULT_STEPS,
             Model::QwenImage21Fast => crate::qwen21::fast::STEPS,
+            Model::MossImage => crate::moss::DEFAULT_STEPS,
+            Model::MossImageFast => crate::moss::fast::STEPS,
         }
     }
 
-    /// Default guidance scale: off for every model. Each follows its
-    /// reference pipeline's convention (see [`GenerateOptions::guidance_scale`]),
-    /// so off is 0 for Z-Image-Turbo and 1 for Qwen-Image-2.1.
+    /// Default guidance scale, each in its reference pipeline's convention
+    /// (see [`GenerateOptions::guidance_scale`]): off for Z-Image-Turbo (0),
+    /// Qwen-Image-2.1 and the 4-step variants (1), 3 for MOSS-Image.
     pub fn default_guidance(self) -> f64 {
         match self {
             Model::ZImageTurbo => 0.0,
-            Model::QwenImage21 | Model::QwenImage21Fast => 1.0,
+            Model::QwenImage21 | Model::QwenImage21Fast | Model::MossImageFast => 1.0,
+            Model::MossImage => crate::moss::DEFAULT_GUIDANCE as f64,
         }
     }
 
@@ -78,6 +94,7 @@ impl Model {
         match self {
             Model::ZImageTurbo => SIZE_ALIGN,
             Model::QwenImage21 | Model::QwenImage21Fast => crate::qwen21::SIZE_ALIGN,
+            Model::MossImage | Model::MossImageFast => crate::moss::SIZE_ALIGN,
         }
     }
 
@@ -177,6 +194,10 @@ pub struct GenerateOptions {
     ///   empty. Turbo is distilled to run without it (0).
     /// - Qwen-Image-2.1 (true CFG): `neg + s * (pos - neg)`, on when `s > 1`
     ///   and `negative_prompt` is set. The 4-step variant runs without it.
+    /// - MOSS-Image: `neg + s * (pos - neg)`, on when `s != 1`, against the
+    ///   empty prompt if `negative_prompt` is empty, with the negative branch
+    ///   skipping one block (the reference's default). On (3) by default.
+    ///   The 4-step variant runs without it.
     ///
     /// Guidance runs the model twice per step.
     pub guidance_scale: f64,
@@ -251,10 +272,7 @@ impl GenerateOptions {
         match self.init_image {
             Some(_) => self
                 .num_steps
-                .saturating_sub(crate::zimage::scheduler::start_index(
-                    self.num_steps,
-                    self.strength,
-                )),
+                .saturating_sub(crate::schedule::start_index(self.num_steps, self.strength)),
             None => self.num_steps,
         }
     }
@@ -278,6 +296,35 @@ impl GenerateOptions {
             anyhow::ensure!(
                 self.negative_prompt.is_empty() || self.guidance_scale > 0.0,
                 "a negative prompt needs guidance_scale above 0 ({model} runs without guidance by default)"
+            );
+        }
+        if model == Model::MossImage {
+            anyhow::ensure!(
+                self.guidance_scale.is_finite() && self.guidance_scale >= 0.0,
+                "guidance_scale must be at least 0, got {}",
+                self.guidance_scale
+            );
+            anyhow::ensure!(
+                self.negative_prompt.is_empty()
+                    || crate::moss::pipeline::guided(self.guidance_scale),
+                "a negative prompt needs guidance: guidance_scale 1 turns it off"
+            );
+        }
+        if model == Model::MossImageFast {
+            let steps = crate::moss::fast::STEPS;
+            anyhow::ensure!(
+                self.num_steps <= steps,
+                "{model} runs at most {steps} steps (its distilled step codes), got {}",
+                self.num_steps
+            );
+            anyhow::ensure!(
+                !crate::moss::pipeline::guided(self.guidance_scale) && self.negative_prompt.is_empty(),
+                "{model} runs without guidance: drop the negative prompt and leave guidance_scale at 1"
+            );
+            anyhow::ensure!(
+                self.init_image.is_none(),
+                "{model} can't start from an init image (its sampler has no noise level to start at); use {}",
+                Model::MossImage
             );
         }
         if model == Model::QwenImage21Fast {
@@ -350,7 +397,9 @@ impl GenerateOptions {
 pub enum Progress {
     /// The prompt was encoded into this many tokens.
     Encoded { tokens: usize },
-    /// A denoising step finished (1-based `step`).
+    /// A denoising step finished (1-based `step`): `t` is the model's time
+    /// input for it, normalized to [0, 1] (in each model's own convention),
+    /// and `sigma` the noise level it left.
     Step {
         step: usize,
         total: usize,
@@ -396,6 +445,7 @@ pub struct Pipeline {
 enum Inner {
     ZImage(Box<ZImagePipeline>),
     Qwen(Box<QwenPipeline>),
+    Moss(Box<MossPipeline>),
 }
 
 impl Pipeline {
@@ -441,6 +491,26 @@ impl Pipeline {
                     &opts.loras,
                 )?))
             }
+            Model::MossImage => Inner::Moss(Box::new(MossPipeline::load(
+                &files,
+                None,
+                opts.quantize,
+                opts.parts,
+                cache,
+                &opts.loras,
+            )?)),
+            Model::MossImageFast => {
+                use crate::moss::fast::{REPO, REVISION};
+                let adapter = ModelFiles::at_revision(REPO, REVISION)?;
+                Inner::Moss(Box::new(MossPipeline::load(
+                    &files,
+                    Some(&adapter),
+                    opts.quantize,
+                    opts.parts,
+                    cache,
+                    &opts.loras,
+                )?))
+            }
         };
         Ok(Self {
             model: opts.model,
@@ -473,6 +543,7 @@ impl Pipeline {
         let result = match &self.inner {
             Inner::ZImage(p) => p.generate_with(opts, &mut on_progress),
             Inner::Qwen(p) => p.generate_with(opts, &mut on_progress),
+            Inner::Moss(p) => p.generate_with(opts, &mut on_progress),
         };
         // MLX keeps freed buffers for reuse. Between images (often of different
         // sizes) they only pile up: in a mixed-size batch the cache grew to
@@ -491,6 +562,7 @@ impl Pipeline {
         let inner = match &self.inner {
             Inner::ZImage(p) => EncodedInner::ZImage(p.encode(opts)?),
             Inner::Qwen(p) => EncodedInner::Qwen(p.encode(opts)?),
+            Inner::Moss(p) => EncodedInner::Moss(p.encode(opts)?),
         };
         Ok(Encoded {
             model: self.model,
@@ -527,6 +599,9 @@ impl Pipeline {
             (Inner::Qwen(p), EncodedInner::Qwen(e)) => {
                 p.generate_encoded(opts, e, &mut on_progress)
             }
+            (Inner::Moss(p), EncodedInner::Moss(e)) => {
+                p.generate_encoded(opts, e, &mut on_progress)
+            }
             _ => unreachable!("same model"),
         };
         mlx_rs::memory::clear_cache()?;
@@ -544,6 +619,7 @@ pub struct Encoded {
 enum EncodedInner {
     ZImage(crate::zimage::pipeline::Encoded),
     Qwen(crate::qwen21::pipeline::Encoded),
+    Moss(crate::moss::pipeline::Encoded),
 }
 
 impl Encoded {
@@ -552,6 +628,17 @@ impl Encoded {
         match &self.inner {
             EncodedInner::ZImage(e) => e.tokens,
             EncodedInner::Qwen(e) => e.tokens,
+            EncodedInner::Moss(e) => e.tokens,
+        }
+    }
+
+    /// Whether the prompt was cut to the text encoder's limit (Z-Image-Turbo
+    /// and MOSS-Image; Qwen-Image-2.1 reads the whole prompt).
+    pub fn truncated(&self) -> bool {
+        match &self.inner {
+            EncodedInner::ZImage(e) => e.truncated,
+            EncodedInner::Qwen(_) => false,
+            EncodedInner::Moss(e) => e.truncated,
         }
     }
 
@@ -560,6 +647,7 @@ impl Encoded {
         match &self.inner {
             EncodedInner::ZImage(e) => e.nbytes(),
             EncodedInner::Qwen(e) => e.nbytes(),
+            EncodedInner::Moss(e) => e.nbytes(),
         }
     }
 }
@@ -608,6 +696,39 @@ pub(crate) fn to_rgb_image(img: &Array) -> Result<image::RgbImage> {
     img.eval()?;
     image::ImageBuffer::from_raw(width, height, img.as_slice::<u8>().to_vec())
         .ok_or_else(|| anyhow::anyhow!("image buffer size mismatch"))
+}
+
+/// An 8-bit image (RGB or RGBA) as a VAE input, (1, H, W, channels) in
+/// [-1, 1], f32.
+pub(crate) fn image_to_array<P>(img: &image::ImageBuffer<P, Vec<u8>>) -> Array
+where
+    P: image::Pixel<Subpixel = u8>,
+{
+    let pixels: Vec<f32> = img
+        .as_raw()
+        .iter()
+        .map(|&p| p as f32 / 127.5 - 1.0)
+        .collect();
+    let shape = [
+        1,
+        img.height() as i32,
+        img.width() as i32,
+        P::CHANNEL_COUNT as i32,
+    ];
+    Array::from_slice(&pixels, &shape)
+}
+
+/// A VAE output in [-1, 1] -> 8-bit pixels, rounded like diffusers'
+/// `postprocess` (computed in f32).
+pub(crate) fn to_pixels(x: &Array) -> Result<Array> {
+    let x = x
+        .as_dtype(mlx_rs::Dtype::Float32)?
+        .multiply(Array::from_f32(0.5))?
+        .add(Array::from_f32(0.5))?;
+    Ok(mlx_rs::ops::clip(&x, (0.0f32, 1.0f32))?
+        .multiply(Array::from_f32(255.0))?
+        .round(None)?
+        .as_dtype(mlx_rs::Dtype::Uint8)?)
 }
 
 #[cfg(test)]
@@ -735,7 +856,7 @@ mod tests {
 
     #[test]
     fn seeded_noise_is_reproducible() {
-        crate::nn::test_device();
+        let _mlx = crate::nn::test_device();
         let shape = [1, 16, 8, 8];
         assert_eq!(seeded_noise(1, shape), seeded_noise(1, shape));
         assert_ne!(seeded_noise(1, shape), seeded_noise(2, shape));
@@ -744,7 +865,7 @@ mod tests {
 
     #[test]
     fn seeded_noise_is_standard_normal() {
-        crate::nn::test_device();
+        let _mlx = crate::nn::test_device();
         let v = seeded_noise(3, [1, 16, 64, 64]);
         let n = v.len() as f32;
         let mean = v.iter().sum::<f32>() / n;
@@ -755,7 +876,7 @@ mod tests {
 
     #[test]
     fn to_rgb_image_checks_shape_and_copies_pixels() {
-        crate::nn::test_device();
+        let _mlx = crate::nn::test_device();
         let px: Vec<u8> = (0..2 * 3 * 3).map(|i| i as u8).collect();
         let a = Array::from_slice(&px, &[1, 2, 3, 3]);
         let img = to_rgb_image(&a).unwrap();
@@ -803,6 +924,52 @@ mod tests {
         o.strength = 0.5;
         o.validate(fast).unwrap();
         assert_eq!(o.steps_to_run(), 2);
+    }
+
+    #[test]
+    fn moss_guides_by_default_and_its_fast_variant_does_not() {
+        let moss = Model::MossImage;
+        let o = GenerateOptions::for_model(moss, "x");
+        assert_eq!((o.num_steps, o.guidance_scale), (50, 3.0));
+        o.validate(moss).unwrap();
+        let mut o = GenerateOptions::for_model(moss, "x");
+        o.negative_prompt = "blurry".into();
+        o.validate(moss).unwrap();
+        o.guidance_scale = 1.0;
+        let err = o.validate(moss).unwrap_err().to_string();
+        assert!(err.contains("needs guidance"), "{err}");
+        o.guidance_scale = -1.0;
+        let err = o.validate(moss).unwrap_err().to_string();
+        assert!(err.contains("at least 0"), "{err}");
+        opts(1008, 1024).validate(moss).unwrap(); // multiples of 16
+
+        let fast = Model::MossImageFast;
+        let o = GenerateOptions::for_model(fast, "x");
+        assert_eq!((o.num_steps, o.guidance_scale), (4, 1.0));
+        o.validate(fast).unwrap();
+        assert_eq!(fast.repo(), moss.repo());
+        assert!(!fast.supports_reference_images());
+        let with = |f: &dyn Fn(&mut GenerateOptions)| {
+            let mut o = GenerateOptions::for_model(fast, "x");
+            f(&mut o);
+            o.validate(fast).map_err(|e| e.to_string())
+        };
+        assert!(with(&|o| o.num_steps = 2).is_ok()); // each prefix was trained
+        assert!(with(&|o| o.num_steps = 5)
+            .unwrap_err()
+            .contains("at most 4 steps"));
+        assert!(with(&|o| o.guidance_scale = 3.0)
+            .unwrap_err()
+            .contains("without guidance"));
+        assert!(with(&|o| o.negative_prompt = "blurry".into())
+            .unwrap_err()
+            .contains("without guidance"));
+        let err = with(&|o| {
+            o.init_image = Some(image::RgbImage::new(64, 64));
+            o.strength = 0.5;
+        })
+        .unwrap_err();
+        assert!(err.contains("init image"), "{err}");
     }
 
     #[test]

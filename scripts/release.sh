@@ -87,7 +87,8 @@ Keep mlx.metallib in the same folder as mixel: it holds MLX's GPU kernels.
 
 The first run downloads the model weights (~33 GB) to ~/.cache/huggingface.
 --quantize 8 or 4 needs less memory (5.4 GB for a 1024x1024 image at 4 bits);
-on a 16 GB Mac, use --quantize 8 for z-image-turbo and 4 for the qwen models.
+on a 16 GB Mac, use --quantize 8 for z-image-turbo, 4 for the qwen models
+and 8 or 4 for the moss models.
 If macOS blocks the downloaded binary, run:
   xattr -d com.apple.quarantine mixel
 EOF

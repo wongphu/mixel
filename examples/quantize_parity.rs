@@ -144,10 +144,8 @@ fn fmt_errs(errs: &[f64]) -> String {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let model = match args.get(1).map(String::as_str) {
-        None | Some("z-image-turbo") => Model::ZImageTurbo,
-        Some("qwen-image-2.1") => Model::QwenImage21,
-        Some("qwen-image-2.1-fast") => Model::QwenImage21Fast,
-        Some(other) => anyhow::bail!("unknown model {other}"),
+        None => Model::ZImageTurbo,
+        Some(name) => name.parse()?,
     };
     let size: usize = args.get(2).map(|s| s.parse()).transpose()?.unwrap_or(1024);
     let out_dir = PathBuf::from(args.get(3).map(String::as_str).unwrap_or("."));

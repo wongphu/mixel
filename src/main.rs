@@ -30,6 +30,14 @@ enum ModelArg {
     /// softer fine detail; also edits with --ref-image
     #[value(name = "qwen-image-2.1-fast", alias = "qwen-fast")]
     QwenImage21Fast,
+    /// MOSS-Image-SFT: slow (50 steps with guidance); text-to-image and
+    /// img2img, best at text in images and at JSON layout prompts
+    #[value(name = "moss-image", alias = "moss")]
+    MossImage,
+    /// MOSS-Image-SFT in 4 steps (rapid-moss adapter): text-to-image ~25x
+    /// faster, without guidance
+    #[value(name = "moss-image-fast", alias = "moss-fast")]
+    MossImageFast,
 }
 
 impl ModelArg {
@@ -38,6 +46,8 @@ impl ModelArg {
             Self::ZImageTurbo => Model::ZImageTurbo,
             Self::QwenImage21 => Model::QwenImage21,
             Self::QwenImage21Fast => Model::QwenImage21Fast,
+            Self::MossImage => Model::MossImage,
+            Self::MossImageFast => Model::MossImageFast,
         }
     }
 }
@@ -82,7 +92,14 @@ Choosing a model:
   qwen-image-2.1           ~6 min for 1024x1024, ~8 min for an edit (40
                            steps). Use when the fast variant's detail is
                            not enough.
-  Both Qwen variants' weights are for research, not commercial use.
+  moss-image-fast          ~28 s for 1024x1024 (4 steps). Use for images
+  (alias moss-fast)        with text in them (signs, posters, labels, in
+                           English or Chinese) and for JSON layout prompts.
+  moss-image (alias moss)  ~13 min for 1024x1024 (50 steps, each run twice
+                           for guidance). Use when the fast variant's
+                           detail is not enough, or for img2img.
+  Both Qwen variants' weights are for research, not commercial use; the
+  moss ones are Apache-2.0.
 
 Recipes:
   Text to image:
@@ -90,6 +107,9 @@ Recipes:
   Edit a photo (keeps its content, changes what the prompt says):
     mixel --model qwen-image-2.1-fast --ref-image in.png \\
           --prompt \"make it night\" --seed 1 --output night.png
+  Text in the image (quote the words exactly as they should appear):
+    mixel --model moss-fast --prompt 'a bakery window, a sign reads \"OPEN\"' \\
+          --seed 1 --output sign.png
   Variation of an image (img2img; lower --strength = closer to it):
     mixel --init-image in.png --strength 0.7 --prompt \"...\" --seed 1 --output v.png
   Add a LoRA trained for the model (repeatable; FILE[:SCALE]):
@@ -116,47 +136,55 @@ Where the image goes:
   - Parent directories are created. Single-image mode overwrites; batch mode
     skips outputs that already exist (--overwrite to regenerate).
   - Each saved image prints a line: \"Done! Image saved to <path> (<secs>s)\".
-  - Without --output: z_image_output.png or qwen_image_output.png.
+  - Without --output: z_image_output.png, qwen_image_output.png or
+    moss_image_output.png.
   - Output names must end in .png or .jpg (checked before loading).
 
-Sizes: width and height must be multiples of 16 (z-image-turbo) or 32
-(qwen models); default 1024x1024, or follows --init-image / --ref-image.
+Sizes: width and height must be multiples of 16 (z-image-turbo, moss
+models) or 32 (qwen models); default 1024x1024, or follows --init-image /
+--ref-image.
 Smaller is faster: 512x512 takes ~14 s with z-image-turbo.
 
 Prompts: z-image-turbo reads at most 512 tokens (a few hundred words) and
-ignores the rest; the \"Token count\" line says when a prompt was cut.
+the moss models 4096 (long JSON layouts fit); the rest is ignored, and the
+\"Token count\" line says when a prompt was cut.
 
-Guidance (--guidance-scale, --negative-prompt) is off by default, as all
-three models are meant to run; it doubles the time per step. z-image-turbo
-turns it on above 0, steering away from --negative-prompt (or from the
-empty prompt without one); a negative prompt alone is rejected.
-qwen-image-2.1 turns it on above 1 and needs a negative prompt.
+Guidance (--guidance-scale, --negative-prompt) doubles the time per step.
+z-image-turbo turns it on above 0 (default 0), steering away from
+--negative-prompt (or from the empty prompt without one); a negative prompt
+alone is rejected. qwen-image-2.1 turns it on above 1 (default 1) and needs
+a negative prompt. moss-image has it on by default (3), against
+--negative-prompt or the empty prompt; 1 turns it off. The 4-step variants
+run without it.
 
 Running it:
   - Per 1024x1024 image: ~1 min (z-image-turbo), ~38-58 s
-    (qwen-image-2.1-fast) or 6-8 min (qwen-image-2.1), plus a few seconds
-    of model loading once the weights are cached. The first run downloads
-    ~33 GB (z-image-turbo) or ~31 GB (qwen models; the fast variant adds
-    0.35 GB) to ~/.cache/huggingface. Use long timeouts or run it in the
-    background.
+    (qwen-image-2.1-fast), 6-8 min (qwen-image-2.1), ~28 s
+    (moss-image-fast) or ~13 min (moss-image), plus a few seconds of model
+    loading once the weights are cached. The first run downloads ~33 GB
+    (z-image-turbo), ~31 GB (qwen models; the fast variant adds 0.35 GB) or
+    ~25 GB (moss models; the fast variant adds 1.2 GB) to
+    ~/.cache/huggingface. Use long timeouts or run it in the background.
   - qwen-image-2.1-fast always runs 4 steps without guidance: --num-steps
     other than 4, or --guidance-scale above 1 with a negative prompt, is
-    rejected.
+    rejected. moss-image-fast runs 1-4 steps (default 4) without guidance
+    or a negative prompt, and can't start from --init-image.
   - Needs Apple Silicon and memory: at 1024x1024, ~14 GB peak for
-    z-image-turbo and ~17-18 GB for the qwen models (GB = 2^30 bytes). Run
-    one mixel at a time.
-  - Less memory: --quantize 8 (~8 GB z-image-turbo, ~11-12 GB qwen) gives
-    practically the same images; --quantize 4 (~5.4 GB, ~7.5-9 GB) gives
-    images as good but not the same ones for a seed. Both are ~10-25%
-    slower per step on an M3 Max (on an M4, 8 and 4 bits run at the same
-    speed). The GPU can use only part of the memory (~74% on a 16 GB Mac);
-    past that, steps run 2-3x slower. On a 16 GB Mac use z-image-turbo
+    z-image-turbo, ~17-18 GB for the qwen models and ~15 GB for the moss
+    models (GB = 2^30 bytes). Run one mixel at a time.
+  - Less memory: --quantize 8 (~8 GB z-image-turbo, ~11-12 GB qwen, ~9 GB
+    moss) gives practically the same images; --quantize 4 (~5.4 GB, ~7.5-9
+    GB, ~7 GB) gives images as good but not the same ones for a seed. Both
+    are ~10-25% slower per step on an M3 Max (on an M4, 8 and 4 bits run at
+    the same speed). The GPU can use only part of the memory (~74% on a 16
+    GB Mac); past that, steps run 2-3x slower. On a 16 GB Mac use z-image-turbo
     --quantize 8 (~155 s per 1024x1024 image on an M4 Mac mini) and the qwen
-    models with --quantize 4 (~90 s, 4 steps); 32 GB runs everything in bf16.
+    models with --quantize 4 (~90 s, 4 steps); the moss models fit with
+    --quantize 4 or 8 (not yet timed there); 32 GB runs everything in bf16.
   - With --quantize, the first run saves the quantized weights to
     ~/.cache/mixel/weights (6 GB for z-image-turbo at 4 bits, 8.7 GB for
-    qwen) and later runs load them in seconds (16 GB Mac mini: 1-5 s instead
-    of ~17 s); --no-cache skips it.
+    qwen, 8.3 GB for moss) and later runs load them in seconds (16 GB Mac
+    mini: 1-5 s instead of ~17 s); --no-cache skips it.
     Delete ~/.cache/mixel to free the space.
   - The text encoders run first for all images (a batch in chunks), then
     are freed before the transformer loads, so the two phases print two
@@ -218,15 +246,16 @@ struct Args {
     strength: Option<f64>,
 
     /// Number of inference steps [default: 9 for z-image-turbo, 40 for
-    /// qwen-image-2.1; qwen-image-2.1-fast always runs 4].
+    /// qwen-image-2.1, 50 for moss-image; qwen-image-2.1-fast always runs 4].
     #[arg(long)]
     num_steps: Option<usize>,
 
     /// Classifier-free guidance, as each model's reference pipeline defines
     /// it. z-image-turbo: on above 0 (default 0), against --negative-prompt or
     /// the empty prompt. qwen-image-2.1: on above 1 (default 1) with
-    /// --negative-prompt. qwen-image-2.1-fast: none. Guidance runs the model
-    /// twice per step.
+    /// --negative-prompt. qwen-image-2.1-fast: none. moss-image: on unless 1
+    /// (default 3), against --negative-prompt or the empty prompt. Guidance
+    /// runs the model twice per step.
     #[arg(long)]
     guidance_scale: Option<f64>,
 
@@ -250,7 +279,8 @@ struct Args {
     #[arg(long, requires = "quantize")]
     no_cache: bool,
 
-    /// Add a LoRA trained for the model (z-image-turbo or Qwen-Image-2.1): a
+    /// Add a LoRA trained for the model (z-image-turbo, Qwen-Image-2.1 or
+    /// MOSS-Image): a
     /// .safetensors file, with an optional strength, e.g. --lora
     /// style.safetensors:0.8 [default: 1]. Repeat for several; their effects
     /// add up. Applies to every image of a batch.
@@ -261,7 +291,8 @@ struct Args {
     #[arg(long)]
     model_path: Option<String>,
 
-    /// Output image filename [default: z_image_output.png or qwen_image_output.png].
+    /// Output image filename [default: z_image_output.png, qwen_image_output.png
+    /// or moss_image_output.png].
     #[arg(long, conflicts_with = "input")]
     output: Option<String>,
 
@@ -573,6 +604,7 @@ fn default_output(args: &Args) -> PathBuf {
         (None, Model::QwenImage21 | Model::QwenImage21Fast) => {
             PathBuf::from("qwen_image_output.png")
         }
+        (None, Model::MossImage | Model::MossImageFast) => PathBuf::from("moss_image_output.png"),
     }
 }
 
@@ -752,6 +784,9 @@ fn run(args: Args) -> Result<()> {
     let mut lora_lines = Vec::new();
     for lora in &loras {
         let layers = lora.layers()?;
+        if matches!(args.model(), Model::MossImage | Model::MossImageFast) {
+            mixel::moss::fast::check_user_lora(lora)?;
+        }
         lora_lines.push(format!(
             "LoRA: {} (scale {}, {} layers)",
             lora.path.display(),
@@ -938,9 +973,7 @@ fn run(args: Args) -> Result<()> {
 fn generate(pipeline: &Pipeline, job: &Job, encoded: &Encoded) -> Result<()> {
     let out = pipeline.generate_encoded_with(&job.options()?, encoded, |p| match p {
         Progress::Encoded { tokens } => {
-            let cut = job.model == Model::ZImageTurbo
-                && tokens >= mixel::zimage::pipeline::MAX_PROMPT_TOKENS;
-            let note = if cut {
+            let note = if encoded.truncated() {
                 " (the limit; the rest of the prompt is ignored)"
             } else {
                 ""
@@ -1548,6 +1581,16 @@ not json
             args(&["--model", "qwen-fast"]).model(),
             Model::QwenImage21Fast
         );
+        assert_eq!(args(&["--model", "moss-image"]).model(), Model::MossImage);
+        assert_eq!(args(&["--model", "moss"]).model(), Model::MossImage);
+        assert_eq!(
+            args(&["--model", "moss-image-fast"]).model(),
+            Model::MossImageFast
+        );
+        assert_eq!(
+            args(&["--model", "moss-fast"]).model(),
+            Model::MossImageFast
+        );
         assert!(Args::try_parse_from(["candy", "--model", "sdxl"]).is_err());
     }
 
@@ -1562,6 +1605,16 @@ not json
         let job = single_job(&args(&["--model", "qwen-fast", "--seed", "1"])).unwrap();
         assert_eq!((job.num_steps, job.guidance_scale), (4, 1.0));
         assert_eq!(job.output, PathBuf::from("qwen_image_output.png"));
+    }
+
+    #[test]
+    fn moss_uses_its_own_defaults() {
+        let job = single_job(&args(&["--model", "moss", "--seed", "1"])).unwrap();
+        assert_eq!((job.num_steps, job.guidance_scale), (50, 3.0));
+        assert_eq!(job.output, PathBuf::from("moss_image_output.png"));
+        let job = single_job(&args(&["--model", "moss-fast", "--seed", "1"])).unwrap();
+        assert_eq!((job.num_steps, job.guidance_scale), (4, 1.0));
+        assert_eq!(job.output, PathBuf::from("moss_image_output.png"));
     }
 
     #[test]
