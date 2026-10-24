@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn reads_both_layouts_and_folds_in_alpha_and_scale() {
-        crate::nn::test_device();
+        let _mlx = crate::nn::test_device();
         let dir = tempfile::tempdir().unwrap();
         let down = Array::from_slice(&[1.0f32; 2 * 4], &[2, 4]);
         let up = Array::from_slice(&[1.0f32; 3 * 2], &[3, 2]);
@@ -271,6 +271,7 @@ mod tests {
 
     #[test]
     fn rejects_files_it_cannot_use() {
+        let _mlx = crate::nn::test_device();
         let dir = tempfile::tempdir().unwrap();
         let t = || Array::from_slice(&[0.0f32; 4], &[2, 2]);
         let err = |name: &str, tensors: &[(&str, Array)]| {
@@ -309,6 +310,7 @@ mod tests {
 
     #[test]
     fn strips_stacked_prefixes() {
+        let _mlx = crate::nn::test_device();
         let dir = tempfile::tempdir().unwrap();
         let t = || Array::from_slice(&[0.0f32; 4], &[2, 2]);
         let name = "diffusion_model.transformer.transformer_blocks.0.attn.to_q";

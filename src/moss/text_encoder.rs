@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn partial_rope_rotates_only_the_first_quarter() {
-        crate::nn::test_device();
+        let _mlx = crate::nn::test_device();
         let x = mlx_rs::random::normal::<f32>(
             &[1, 2, 3, HEAD_DIM][..],
             None,

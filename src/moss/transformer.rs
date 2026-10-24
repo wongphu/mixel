@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn rope_positions_center_the_grid_and_follow_the_text() {
-        crate::nn::test_device();
+        let _mlx = crate::nn::test_device();
         let (cos, sin) = rope_tables(2, 2, 3, Dtype::Float32).unwrap();
         assert_eq!(cos.shape(), &[1, 7, 1, 128]);
         sin.eval().unwrap();
@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn situ_matches_its_formula() {
-        crate::nn::test_device();
+        let _mlx = crate::nn::test_device();
         let h = Array::from_slice(&[-60.0f32, -1.0, 0.0, 2.0, 80.0], &[5]);
         let g = Array::from_slice(&[-3.0f32, 0.5, 1.0, 10.0, -0.25], &[5]);
         let out = situ(&h, &g).unwrap();

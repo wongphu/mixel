@@ -856,7 +856,7 @@ mod tests {
 
     #[test]
     fn seeded_noise_is_reproducible() {
-        crate::nn::test_device();
+        let _mlx = crate::nn::test_device();
         let shape = [1, 16, 8, 8];
         assert_eq!(seeded_noise(1, shape), seeded_noise(1, shape));
         assert_ne!(seeded_noise(1, shape), seeded_noise(2, shape));
@@ -865,7 +865,7 @@ mod tests {
 
     #[test]
     fn seeded_noise_is_standard_normal() {
-        crate::nn::test_device();
+        let _mlx = crate::nn::test_device();
         let v = seeded_noise(3, [1, 16, 64, 64]);
         let n = v.len() as f32;
         let mean = v.iter().sum::<f32>() / n;
@@ -876,7 +876,7 @@ mod tests {
 
     #[test]
     fn to_rgb_image_checks_shape_and_copies_pixels() {
-        crate::nn::test_device();
+        let _mlx = crate::nn::test_device();
         let px: Vec<u8> = (0..2 * 3 * 3).map(|i| i as u8).collect();
         let a = Array::from_slice(&px, &[1, 2, 3, 3]);
         let img = to_rgb_image(&a).unwrap();

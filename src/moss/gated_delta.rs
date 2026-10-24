@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn chunked_matches_the_token_by_token_recurrence() {
-        crate::nn::test_device();
+        let _mlx = crate::nn::test_device();
         // Within a chunk, at its edges, and across several chunks.
         for (i, len) in [1, 5, 63, 64, 65, 130].into_iter().enumerate() {
             let [q, k, v, g, beta] = inputs(len, i as u64);
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn the_inverse_inverts() {
-        crate::nn::test_device();
+        let _mlx = crate::nn::test_device();
         let a = mlx_rs::random::normal::<f32>(
             &[2, CHUNK, CHUNK][..],
             None,

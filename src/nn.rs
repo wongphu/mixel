@@ -545,9 +545,8 @@ const BAND_BYTES: usize = 512 << 20;
 /// activation) makes full-size temporaries of its own. In bands, each with
 /// the rows its kernel overlaps, both shrink to a band's worth. `pre` must
 /// work pixel by pixel, so applying it to a band equals cropping its output.
-/// The result matches one convolution in f32 (bit for bit on an M3 Max; on
-/// CI's virtual GPU, not always); in bf16, MLX may pick another algorithm for
-/// the smaller shape, which rounds differently.
+/// The result matches one convolution exactly in f32; in bf16, MLX may pick
+/// another algorithm for the smaller shape, which rounds differently.
 pub fn conv_in_bands(
     x: &Array,
     weight: &Array,
@@ -713,14 +712,21 @@ pub fn split_seq(x: &Array, bounds: &[i32], axis: i32) -> Result<Vec<Array>> {
     Ok(mlx_rs::ops::split_at_indices(x, bounds, axis)?)
 }
 
-/// Runs MLX on the CPU when `MIXEL_TEST_CPU` is set, for test machines
-/// without a usable Metal GPU (GitHub's macOS runners). MLX otherwise uses
-/// the GPU, and fails without one.
+/// For tests that run MLX: one at a time, and on the CPU when
+/// `MIXEL_TEST_CPU` is set, for test machines without a usable Metal GPU
+/// (GitHub's macOS runners; MLX otherwise uses the GPU, and fails without
+/// one). Hold the returned guard for the whole test: on CI's virtual GPU, a
+/// convolution intermittently returned zeros while other tests ran MLX in
+/// parallel (it never did on an M3 Max).
 #[cfg(test)]
-pub(crate) fn test_device() {
+pub(crate) fn test_device() -> std::sync::MutexGuard<'static, ()> {
+    static MLX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A failed test poisons the lock; the others still run.
+    let guard = MLX.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var_os("MIXEL_TEST_CPU").is_some() {
         mlx_rs::Device::set_default(&mlx_rs::Device::cpu());
     }
+    guard
 }
 
 #[cfg(test)]
@@ -729,7 +735,7 @@ mod tests {
 
     #[test]
     fn linear_adds_the_low_rank_update() {
-        test_device();
+        let _mlx = test_device();
         // W = I (2x2), b = [1, 1], update = up (2x1) @ down (1x2)
         let mut w = Weights {
             map: HashMap::from([
@@ -794,7 +800,7 @@ mod tests {
 
     #[test]
     fn quantized_layers_match_the_unquantized_ones() {
-        test_device();
+        let _mlx = test_device();
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("w.safetensors");
         let key = mlx_rs::random::key(0).unwrap();
@@ -845,7 +851,7 @@ mod tests {
 
     #[test]
     fn convolution_in_bands_matches_one_convolution() {
-        test_device();
+        let _mlx = test_device();
         let key = |i| mlx_rs::random::key(i).unwrap();
         let x = mlx_rs::random::normal::<f32>(&[1, 100, 16, 8][..], None, None, &key(0)).unwrap();
         let w3 = mlx_rs::random::normal::<f32>(&[4, 3, 3, 8][..], None, None, &key(1)).unwrap();
@@ -858,8 +864,7 @@ mod tests {
                 .unwrap()
         };
         // A 3x3 input row is 16 px * 8 channels * 9 * 4 bytes: bands of 7 rows
-        // (the last one 2), of 1 row, and a single band. f32 rounding on CI's
-        // virtual GPU has gone past 1e-6; bands off by one row are ~120% off.
+        // (the last one 2), of 1 row, and a single band.
         let row = 16 * 8 * 9 * 4;
         for (w, padding) in [(&w3, 1), (&w1, 0)] {
             let expected = one(w, padding);
@@ -867,14 +872,14 @@ mod tests {
                 let banded = conv_in_bands_of(&x, w, Some(&b), padding, silu, band_bytes).unwrap();
                 assert_eq!(banded.shape(), expected.shape());
                 let err = rel_err(&banded, &expected);
-                assert!(err < 1e-5, "bands of {band_bytes} bytes: {err:e}");
+                assert!(err < 1e-6, "bands of {band_bytes} bytes: {err:e}");
             }
         }
     }
 
     #[test]
     fn quantized_weights_round_trip_through_the_cache() {
-        test_device();
+        let _mlx = test_device();
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("w.safetensors");
         let key = mlx_rs::random::key(0).unwrap();
@@ -936,7 +941,7 @@ mod tests {
 
     #[test]
     fn large_inputs_unpack_quantized_weights_to_the_same_result() {
-        test_device();
+        let _mlx = test_device();
         let key = mlx_rs::random::key(3).unwrap();
         let weight = mlx_rs::random::normal::<f32>(&[64, 128][..], None, None, &key).unwrap();
         let (wq, scales, biases) = mlx_rs::ops::quantize(&weight, GROUP_SIZE, 4).unwrap();

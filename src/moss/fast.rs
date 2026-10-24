@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn refuses_the_adapters_lora_but_not_a_regular_one() {
-        crate::nn::test_device();
+        let _mlx = crate::nn::test_device();
         let dir = tempfile::tempdir().unwrap();
         let rapid = [
             ("rank", "128"),

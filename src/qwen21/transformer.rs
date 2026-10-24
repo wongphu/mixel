@@ -525,7 +525,7 @@ mod tests {
 
     #[test]
     fn fused_gate_up_updates_split_into_gate_and_proj() {
-        crate::nn::test_device();
+        let _mlx = crate::nn::test_device();
         let down = Array::from_slice(&[1.0f32, 2.0], &[1, 2]);
         // Rows 0-1 for the gate, 2-3 for proj.
         let up = Array::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4, 1]);
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn text_mask_sees_prefix_and_is_causal_within() {
-        crate::nn::test_device();
+        let _mlx = crate::nn::test_device();
         let m = text_mask(2, 2).unwrap();
         m.eval().unwrap();
         assert_eq!(

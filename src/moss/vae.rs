@@ -77,7 +77,7 @@ mod tests {
 
     #[test]
     fn patchify_and_unpatchify_are_inverses_in_the_reference_order() {
-        crate::nn::test_device();
+        let _mlx = crate::nn::test_device();
         let (h, w) = (2, 3);
         let x = Array::from_iter(
             0..(4 * h * w * LATENT_CHANNELS),
