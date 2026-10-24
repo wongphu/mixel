@@ -18,8 +18,8 @@ This version was written from mixel 0.5.0 (commit `bb7c156`, 2026-10-03), then u
 | `z-image-turbo` (`turbo`, default) | text-to-image, img2img, LoRAs | 9 (default) | ~59 s | — (can't take references) | ~13.5 GB |
 | `qwen-image-2.1-fast` (`qwen-fast`) | **editing with reference images**; also t2i, img2img | 4 (fixed) | ~38 s | ~58 s | ~17–18 GB |
 | `qwen-image-2.1` (`qwen`) | editing when the fast variant's detail isn't enough; also t2i, img2img | 40 (default) | ~6 min | ~8 min | ~17–18 GB |
-| `moss-image-fast` (`moss-fast`) | **text in the image** (signs, posters, labels, menus; English or Chinese) and JSON layouts; t2i only | 4 (default; 1–4) | ~30 s | — | ~15 GB |
-| `moss-image` (`moss`) | the same when the fast variant's detail isn't enough; also img2img | 50 (default; guidance on) | ~11 min | — | ~15 GB |
+| `moss-image-fast` (`moss-fast`) | **text in the image** (signs, posters, labels, menus; English or Chinese) and JSON layouts; t2i only | 4 (default; 1–4) | ~28 s | — | ~15 GB |
+| `moss-image` (`moss`) | the same when the fast variant's detail isn't enough; also img2img | 50 (default; guidance on) | ~13 min | — | ~15 GB |
 
 Times are medians on an M3 Max (30-core GPU, 96 GB) with the weights cached; peak memory is at 1024×1024 in bf16, in GB of 2^30 bytes (less with `--quantize`, below). 512×512 with Z-Image takes about 14 s, which is good for drafts.
 

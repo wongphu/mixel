@@ -45,9 +45,11 @@ TESTS=(
   "fastq4|Qwen-Image-2.1 fast 4-bit, 1024x1024|qwen-image-2.1-fast|--quantize 4|4|3|7.5|43.8|10.3"
   "fastedit|Qwen-Image-2.1 fast, edit|qwen-image-2.1-fast|--ref-image REF|4|3|18.3|57.8|10.5"
   "fasteditq4|Qwen-Image-2.1 fast 4-bit, edit|qwen-image-2.1-fast|--ref-image REF --quantize 4|4|3|9.0|64.6|11.7"
-  "mossfast|MOSS-Image fast, 1024x1024|moss-image-fast||4|3|15.1|29.8|6.8"
+  "mossfast|MOSS-Image fast, 1024x1024|moss-image-fast||4|3|15.1|28.0|6.4"
+  "mossfastq4|MOSS-Image fast 4-bit, 1024x1024|moss-image-fast|--quantize 4|4|3|6.9|31.4|7.2"
   "qwen|Qwen-Image-2.1, 1024x1024|qwen-image-2.1||40|3|16.7|365.6|9.1"
   "qwenedit|Qwen-Image-2.1, edit|qwen-image-2.1|--ref-image REF|40|3|18.3|484.1|11.7"
+  "moss|MOSS-Image, 1024x1024|moss-image||50|1|15.1|774.1|15.4"
 )
 # Models (Hugging Face repo, download GB) in the order the tests use them.
 repo_of() {
@@ -169,7 +171,7 @@ for t in "${TESTS[@]}"; do
   IFS='|' read -r id label model extra steps runs peak ref ref_step <<<"$t"
   case " $RUN_IDS " in *" $id "*) EST_MIN="$(num "$EST_MIN + $runs * ($ref + 5) / 60")" ;; esac
 done
-echo "Each test runs 3 times. On an $REF_HW this takes ~$(printf "%.0f" "$EST_MIN") min; slower chips take longer."
+echo "Each test runs 3 times (MOSS-Image's 50-step one once). On an $REF_HW this takes ~$(printf "%.0f" "$EST_MIN") min; slower chips take longer."
 [ $DRY_RUN -eq 1 ] && exit 0
 if [ -n "$DOWNLOADS" ] && [ $YES -eq 0 ]; then
   if [ -t 0 ]; then
@@ -345,11 +347,13 @@ done
   echo
   echo "- **Time per image**: generating one image with the model already loaded (text encoding,"
   echo "  denoising, VAE decoding): the median of 3 runs back to back, with no pause, as in a"
-  echo "  batch. **Range** is the fastest and slowest of them: a Mac slows down as it heats up,"
-  echo "  so a wide range mostly shows how much this one throttles under sustained load. Loading"
-  echo "  the model adds a few seconds per run of mixel; the first run of a model also downloads it."
+  echo "  batch (MOSS-Image's 50-step test runs once). **Range** is the fastest and slowest of them:"
+  echo "  a Mac slows down as it heats up, so a wide range mostly shows how much this one throttles"
+  echo "  under sustained load. Loading the model adds a few seconds per run of mixel; the first"
+  echo "  run of a model also downloads it."
   echo "- **Per step**: denoising time per step, the part that grows with the step count: Z-Image-Turbo"
-  echo "  runs 9 steps, Qwen-Image-2.1 fast 4, Qwen-Image-2.1 40 and MOSS-Image fast 4."
+  echo "  runs 9 steps, Qwen-Image-2.1 fast 4, Qwen-Image-2.1 40, MOSS-Image fast 4 and MOSS-Image 50"
+  echo "  (each of its steps runs the transformer twice, for guidance)."
   echo "- **Peak memory**: the most memory mixel used (1 GB = 2^30 bytes, as Apple counts RAM)."
   echo "  Tests that need more than the GPU's working set (the part of memory macOS lets the GPU"
   echo "  use) are skipped. \"Swapped\" means macOS moved memory to disk during the test, which"

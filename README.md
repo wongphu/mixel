@@ -9,15 +9,14 @@ of them also in 4-step variants:
 | `z-image-turbo` (default) | [Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | 9 | ~59 s | text-to-image, img2img, [LoRAs](#loras) |
 | `qwen-image-2.1` | [Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1) | 40 | ~6 min | text-to-image, img2img, **editing with reference images** |
 | `qwen-image-2.1-fast` | Qwen-Image-2.1 + [4-step Fun-Acc LoRA](https://huggingface.co/alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs) | 4 (fixed) | ~38 s | the same, slightly softer fine detail |
-| `moss-image` | [MOSS-Image-SFT](https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT) | 50 | ~11 min | text-to-image, img2img, **[text in images, JSON layouts](#moss-image-text-in-images-and-layouts)** |
-| `moss-image-fast` | MOSS-Image-SFT + [4-step rapid-moss adapter](https://huggingface.co/darask0/MOSS-Image_4-step_adapter_lora) | 4 | ~30 s | text-to-image |
+| `moss-image` | [MOSS-Image-SFT](https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT) | 50 | ~13 min | text-to-image, img2img, **[text in images, JSON layouts](#moss-image-text-in-images-and-layouts)** |
+| `moss-image-fast` | MOSS-Image-SFT + [4-step rapid-moss adapter](https://huggingface.co/darask0/MOSS-Image_4-step_adapter_lora) | 4 | ~28 s | text-to-image |
 
 Times are medians from the [reference benchmark](benchmarks/) on an M3 Max (30-core GPU,
 96 GB), with the weights already in memory; an edit with a ~1024×1024 reference image takes
-~8 min (40 steps) or ~58 s (4 steps). MOSS-Image's aren't in the benchmark yet: the 4-step
-time is the median of 3 runs on the same Mac, and the 50-step one an estimate from it (see
-[below](#moss-image-text-in-images-and-layouts)). Memory figures count GB as Apple does
-(2^30 bytes). All three are ports: Z-Image of candle-transformers' `z_image`
+~8 min (40 steps) or ~58 s (4 steps). MOSS-Image's were measured the same way on the same
+Mac, outside a full benchmark run (the 50-step time from a single run). Memory figures count
+GB as Apple does (2^30 bytes). All three are ports: Z-Image of candle-transformers' `z_image`
 (`src/zimage/`), Qwen-Image-2.1 of the diffusers pipeline and transformers' Qwen3-VL
 (`src/qwen21/`), MOSS-Image of the pipeline bundled with its weights and transformers'
 Qwen3.5 (`src/moss/`). The CLI, JSONL batch mode and seeding match
@@ -109,17 +108,16 @@ the small caption's text came out misspelled ("Silizon" for "Silicon").
 
 - `moss-image` runs like the reference pipeline: 50 steps, guidance 3 against
   `--negative-prompt` or the empty prompt, the negative branch skipping one transformer
-  block (the authors' default). Each step runs the transformer twice, 6.8 s each at
-  1024×1024 on the M3 Max, so an image takes ~11 min (not yet benchmarked: measurements so
-  far were slowed by other GPU work). `--guidance-scale 1` turns guidance off and halves
-  that. img2img works the way it does for the other models; the official pipeline has none.
+  block (the authors' default). Each step runs the transformer twice: a 1024×1024 image
+  takes ~13 min on the M3 Max (15.4 s per step). `--guidance-scale 1` turns guidance off and
+  halves that. img2img works the way it does for the other models; the official pipeline has none.
 - `moss-image-fast` (or `moss-fast`) adds darask0's community
   [rapid-moss adapter](https://huggingface.co/darask0/MOSS-Image_4-step_adapter_lora),
   distilled from MOSS-Image-SFT with data-space DMD and DMAD: 4 steps without guidance,
-  ~30 s per 1024×1024 image. `--num-steps` 1–3 runs a shorter prefix (each was trained;
-  their image quality isn't checked here). Its sampler predicts the image from one fixed noise at four fixed time
-  codes, without a noise schedule, so it can't start from `--init-image`; guidance and
-  negative prompts are rejected too. mixel uses the adapter at the revision it was checked
+  ~28 s per 1024×1024 image. `--num-steps` 1–3 runs a shorter prefix (each was trained;
+  their image quality isn't checked here). Its sampler predicts the image from one fixed
+  noise at four fixed time codes, without a noise schedule, so it can't start from
+  `--init-image`; guidance and negative prompts are rejected too. mixel uses the adapter at the revision it was checked
   against.
 - The adapter adds rank-128 updates to every block's projections, run unmerged (merged into
   bf16 weights, most of each would round away), and replaces the time embedding and the two
@@ -200,7 +198,9 @@ is borderline even at 4 bits; 32 GB and up runs everything in bf16.
 - **Both are slower per step**, as MLX's quantized matmuls unpack the weights as they go: in
   the [reference benchmark](benchmarks/), a 1024×1024 Z-Image-Turbo step takes 7.7 s at 8
   bits and 7.9 s at 4 against 6.3 s in bf16, and a 4-step Qwen-Image-2.1 step 10.3 s at 4
-  bits against 8.7 s (an edit 11.7 against 10.5). In mixel 0.5.0, large inputs (a
+  bits against 8.7 s (an edit 11.7 against 10.5). A 4-step MOSS-Image step takes 6.5 s at 8
+  bits and 7.2 s at 4 against 6.4 s (run in that order, so the later ones on a warmer Mac).
+  In mixel 0.5.0, large inputs (a
   1024×1024 image's ~4100 tokens) run as a bf16 matmul on the unpacked weights instead, 4–6%
   slower than bf16 per matmul rather than 8–13%: on the Mac mini, quantized steps got 5–7%
   faster than in 0.4.1, with the same images.
@@ -339,13 +339,13 @@ We're collecting mixel timings across Macs. If you can spare the time, run:
 
 ```bash
 scripts/benchmark.sh --dry-run   # what would run, and download, on this Mac
-scripts/benchmark.sh             # run it: ~70 min on an M3 Max
+scripts/benchmark.sh             # run it: ~80 min on an M3 Max
 ```
 
 It runs each test that fits in your GPU's working set: Z-Image-Turbo at 512×512 and
 1024×1024 (also in 8 and 4 bits), Qwen-Image-2.1 in 4 and 40 steps, text-to-image and an
-edit (the 4-step ones also in 4 bits), and MOSS-Image in 4 steps. A 16 GB Mac runs the quantized tests, a 32 GB one
-all of them. It asks before downloading weights. The result is one file,
+edit (the 4-step ones also in 4 bits), and MOSS-Image in 4 steps (also in 4 bits) and 50.
+A 16 GB Mac runs the quantized tests, a 32 GB one all of them. It asks before downloading weights. The result is one file,
 `mixel-benchmark-<chip>-<gpu>-<memory>-<version>-<date>.md`, labelled with your Mac, chip,
 CPU and GPU cores, memory, macOS version and power source, with a table to read and a JSON
 block for us to compile.

@@ -92,10 +92,10 @@ Choosing a model:
   qwen-image-2.1           ~6 min for 1024x1024, ~8 min for an edit (40
                            steps). Use when the fast variant's detail is
                            not enough.
-  moss-image-fast          ~30 s for 1024x1024 (4 steps). Use for images
+  moss-image-fast          ~28 s for 1024x1024 (4 steps). Use for images
   (alias moss-fast)        with text in them (signs, posters, labels, in
                            English or Chinese) and for JSON layout prompts.
-  moss-image (alias moss)  ~11 min for 1024x1024 (50 steps, each run twice
+  moss-image (alias moss)  ~13 min for 1024x1024 (50 steps, each run twice
                            for guidance). Use when the fast variant's
                            detail is not enough, or for img2img.
   Both Qwen variants' weights are for research, not commercial use; the
@@ -159,8 +159,8 @@ run without it.
 
 Running it:
   - Per 1024x1024 image: ~1 min (z-image-turbo), ~38-58 s
-    (qwen-image-2.1-fast), 6-8 min (qwen-image-2.1), ~30 s
-    (moss-image-fast) or ~11 min (moss-image), plus a few seconds of model
+    (qwen-image-2.1-fast), 6-8 min (qwen-image-2.1), ~28 s
+    (moss-image-fast) or ~13 min (moss-image), plus a few seconds of model
     loading once the weights are cached. The first run downloads ~33 GB
     (z-image-turbo), ~31 GB (qwen models; the fast variant adds 0.35 GB) or
     ~25 GB (moss models; the fast variant adds 1.2 GB) to
