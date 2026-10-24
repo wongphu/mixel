@@ -545,8 +545,9 @@ const BAND_BYTES: usize = 512 << 20;
 /// activation) makes full-size temporaries of its own. In bands, each with
 /// the rows its kernel overlaps, both shrink to a band's worth. `pre` must
 /// work pixel by pixel, so applying it to a band equals cropping its output.
-/// The result matches one convolution exactly in f32; in bf16, MLX may pick
-/// another algorithm for the smaller shape, which rounds differently.
+/// The result matches one convolution in f32 (bit for bit on an M3 Max; on
+/// CI's virtual GPU, not always); in bf16, MLX may pick another algorithm for
+/// the smaller shape, which rounds differently.
 pub fn conv_in_bands(
     x: &Array,
     weight: &Array,
@@ -857,14 +858,16 @@ mod tests {
                 .unwrap()
         };
         // A 3x3 input row is 16 px * 8 channels * 9 * 4 bytes: bands of 7 rows
-        // (the last one 2), of 1 row, and a single band.
+        // (the last one 2), of 1 row, and a single band. f32 rounding on CI's
+        // virtual GPU has gone past 1e-6; bands off by one row are ~120% off.
         let row = 16 * 8 * 9 * 4;
         for (w, padding) in [(&w3, 1), (&w1, 0)] {
             let expected = one(w, padding);
             for band_bytes in [7 * row, 1, usize::MAX] {
                 let banded = conv_in_bands_of(&x, w, Some(&b), padding, silu, band_bytes).unwrap();
                 assert_eq!(banded.shape(), expected.shape());
-                assert!(rel_err(&banded, &expected) < 1e-6, "{band_bytes}");
+                let err = rel_err(&banded, &expected);
+                assert!(err < 1e-5, "bands of {band_bytes} bytes: {err:e}");
             }
         }
     }
