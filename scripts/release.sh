@@ -4,12 +4,12 @@
 #   scripts/release.sh 0.4.2               # build, test, package, commit, tag
 #   scripts/release.sh 0.4.2 --no-models   # skip what needs the model weights
 #
-# It bumps the version, builds for macOS 14 and up, runs the tests
-# (with --include-ignored, so with the real models, unless --no-models),
-# packages mixel and mlx.metallib into target/dist/, checks the tarball from a
-# fresh folder, then commits "Release <version>" and tags v<version>. It
-# publishes nothing: the commands to push and create the GitHub release are
-# printed at the end.
+# It bumps the version (unless Cargo.toml already has it), builds for macOS 14
+# and up, runs the tests (with --include-ignored, so with the real models,
+# unless --no-models), packages mixel and mlx.metallib into target/dist/,
+# checks the tarball from a fresh folder, then commits "Release <version>" (if
+# it bumped) and tags v<version>. It publishes nothing: the commands to push
+# and create the GitHub release are printed at the end.
 set -euo pipefail
 
 # MLX's minimum. Building for the build machine's macOS (MLX's default) makes
@@ -114,7 +114,11 @@ restore
 trap - EXIT
 
 step "Commit and tag"
-git commit -q -m "Release $VERSION" Cargo.toml Cargo.lock
+if git diff --quiet Cargo.toml Cargo.lock; then
+  echo "Cargo.toml already had $VERSION: tagging HEAD"
+else
+  git commit -q -m "Release $VERSION" Cargo.toml Cargo.lock
+fi
 git tag -a "v$VERSION" -m "mixel $VERSION"
 git log --oneline -1
 

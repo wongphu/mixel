@@ -11,7 +11,7 @@ mixel is a command-line image generator the user wrote (`~/code/mixel`, installe
 
 This version was written from mixel 0.5.0 (commit `bb7c156`, 2026-10-03), then updated for the MOSS-Image models added after 0.6.0 (2026-10-23). `mixel --version` tells you what's installed; builds before 0.5.0 lack some of what follows (`--quantize` came in 0.4.0, `--lora` for Z-Image-Turbo and the weight cache in 0.5.0, `--lora` for the Qwen models after 0.5.0, `moss-image` and `moss-image-fast` after 0.6.0). If `mixel --help` doesn't list the moss models, ignore everything about them below.
 
-**The default model changed in 0.7.0**: from 0.7.0, mixel without `--model` runs `moss-image-fast`; 0.6.0 and earlier run `z-image-turbo`, and so do unreleased builds that print 0.6.0 but whose `mixel --help` doesn't show `[default: moss-image-fast]` under `--model`. Always pass `--model` in the commands you run or hand over, so they mean the same on every version, and pass the same model to the validator below.
+**The default model changed in 0.7.0**: from 0.7.0, mixel without `--model` runs `moss-image-fast`; 0.6.0 and earlier run `z-image-turbo`. Always pass `--model` in the commands you run or hand over, so they mean the same on every version, and pass the same model to the validator below.
 
 ## Models
 
