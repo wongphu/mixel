@@ -11,14 +11,16 @@ mixel is a command-line image generator the user wrote (`~/code/mixel`, installe
 
 This version was written from mixel 0.5.0 (commit `bb7c156`, 2026-10-03), then updated for the MOSS-Image models added after 0.6.0 (2026-10-23). `mixel --version` tells you what's installed; builds before 0.5.0 lack some of what follows (`--quantize` came in 0.4.0, `--lora` for Z-Image-Turbo and the weight cache in 0.5.0, `--lora` for the Qwen models after 0.5.0, `moss-image` and `moss-image-fast` after 0.6.0). If `mixel --help` doesn't list the moss models, ignore everything about them below.
 
+**The default model changed in 0.7.0**: from 0.7.0, mixel without `--model` runs `moss-image-fast`; 0.6.0 and earlier run `z-image-turbo`. Always pass `--model` in the commands you run or hand over, so they mean the same on every version, and pass the same model to the validator below.
+
 ## Models
 
 | `--model` (alias) | Use for | Steps | 1024×1024 image | Edit with one ~1024² reference | Peak memory |
 |---|---|---|---|---|---|
-| `z-image-turbo` (`turbo`, default) | text-to-image, img2img, LoRAs | 9 (default) | ~59 s | — (can't take references) | ~13.5 GB |
+| `z-image-turbo` (`turbo`) | text-to-image, img2img, LoRAs | 9 (default) | ~59 s | — (can't take references) | ~13.5 GB |
 | `qwen-image-2.1-fast` (`qwen-fast`) | **editing with reference images**; also t2i, img2img | 4 (fixed) | ~38 s | ~58 s | ~17–18 GB |
 | `qwen-image-2.1` (`qwen`) | editing when the fast variant's detail isn't enough; also t2i, img2img | 40 (default) | ~6 min | ~8 min | ~17–18 GB |
-| `moss-image-fast` (`moss-fast`) | **text in the image** (signs, posters, labels, menus; English or Chinese) and JSON layouts; t2i only | 4 (default; 1–4) | ~28 s | — | ~15 GB |
+| `moss-image-fast` (`moss-fast`, default) | **text in the image** (signs, posters, labels, menus; English or Chinese) and JSON layouts; t2i only | 4 (default; 1–4) | ~28 s | — | ~15 GB |
 | `moss-image` (`moss`) | the same when the fast variant's detail isn't enough; also img2img | 50 (default; guidance on) | ~13 min | — | ~15 GB |
 
 Times are medians on an M3 Max (30-core GPU, 96 GB) with the weights cached; peak memory is at 1024×1024 in bf16, in GB of 2^30 bytes (less with `--quantize`, below). 512×512 with Z-Image takes about 14 s, which is good for drafts.
@@ -95,8 +97,10 @@ Output naming: `output` → else `<id>.png` → else the 4-digit line number (`0
 ## Running
 
 ```bash
-mixel --input story.jsonl --output-dir out/story
+mixel --model turbo --input story.jsonl --output-dir out/story
 ```
+
+- Without `--model`, mixel runs `moss-image-fast`. Pass `--model turbo` for Z-Image batches such as the story workflow below.
 
 - Batch mode validates every line before loading the model and lists all errors at once with line numbers. Fix and rerun.
 - A run loads in two phases: the text encoders (`Loaded in …`), which encode every prompt, then the transformer and VAE (a second `Loaded in …`); only then do the images start.
@@ -106,7 +110,7 @@ mixel --input story.jsonl --output-dir out/story
 - The first run downloads ~33 GB (turbo), ~31 GB (qwen; the fast variant adds 0.35 GB) or ~25 GB (moss; the fast variant adds 1.2 GB) to `~/.cache/huggingface`.
 - **Run one mixel at a time** (memory). Before starting one, check none is already running (`pgrep -fl '^mixel'`). An 18-image 896×1152 turbo batch takes about 20 minutes on an M3 Max (two to three times that on a 16 GB Mac mini), so if you run it yourself, run it in the background and wait for it to finish rather than polling.
 
-Single images: `mixel --prompt "..." --seed 1 --output fox.png` (always pass `--prompt`; without it a default landscape prompt is used). `--input` can't be combined with `--prompt` or `--output`.
+Single images: `mixel --model moss-fast --prompt "..." --seed 1 --output fox.png` (always pass `--prompt`; without it a default landscape prompt is used). `--input` can't be combined with `--prompt` or `--output`.
 
 Single edit:
 
@@ -131,7 +135,7 @@ ALLOWED = {"prompt","id","negative_prompt","width","height","num_steps","guidanc
            "seed","output","init_image","strength","reference_images"}
 MODELS = {"turbo":"z-image-turbo","qwen":"qwen-image-2.1","qwen-fast":"qwen-image-2.1-fast",
           "moss":"moss-image","moss-fast":"moss-image-fast"}
-def validate(path, model="z-image-turbo", guidance=None):
+def validate(path, model="moss-image-fast", guidance=None):
     model = MODELS.get(model, model)
     qwen = model.startswith("qwen"); fast = model == "qwen-image-2.1-fast"
     turbo = model == "z-image-turbo"; moss = model == "moss-image"; moss_fast = model == "moss-image-fast"
@@ -162,7 +166,7 @@ def validate(path, model="z-image-turbo", guidance=None):
         if (k := out.lower()) in seen: errs.append(f"line {n}: output {out} also used by line {seen[k]}")
         seen[out.lower()] = n
     print("\n".join(errs) or f"OK: {len(seen)} images"); return not errs
-validate(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "z-image-turbo",
+validate(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "moss-image-fast",
          float(sys.argv[3]) if len(sys.argv) > 3 else None)
 ```
 
@@ -199,6 +203,6 @@ img2img tips (any model): changing *what* is in the picture keeps pose and frami
 ## Deliverable
 
 - The `.jsonl` file (named after the project, e.g. `jack_and_the_beanstalk.jsonl`), validated.
-- The exact run command, with the `--output-dir` (and `--model`, `--quantize`, `--lora` if used: they're per run, and change the images).
+- The exact run command, with the `--output-dir` and `--model` (and `--quantize`, `--lora` if used: they're per run, and change the images).
 - A short list of the scenes/ids, so the user can map files to the story.
 - If you ran it: the output folder, how long it took, any failed lines, and which images were edited afterwards (so a rerun won't reproduce them).

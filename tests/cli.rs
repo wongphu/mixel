@@ -76,7 +76,14 @@ fn single_mode_rejects_bad_size_before_loading_model() {
 fn z_image_negative_prompt_without_guidance_fails_before_loading_model() {
     let dir = tempfile::tempdir().unwrap();
     let out = mixel(
-        &["--prompt", "x", "--negative-prompt", "blurry"],
+        &[
+            "--model",
+            "turbo",
+            "--prompt",
+            "x",
+            "--negative-prompt",
+            "blurry",
+        ],
         dir.path(),
     );
     assert!(!out.status.success());
@@ -202,6 +209,8 @@ fn lora_changes_the_image_and_a_zero_one_does_not() {
     write_lora(&dir.path().join("some.safetensors"), 0.01);
     let image = |name: &str, lora: Option<&str>| {
         let mut args = vec![
+            "--model",
+            "turbo",
             "--quantize",
             "4",
             "--prompt",
@@ -313,7 +322,7 @@ fn generates_reproducible_image() {
     )
     .unwrap();
 
-    let out = mixel(&["-i", "p.jsonl"], dir.path());
+    let out = mixel(&["--model", "turbo", "-i", "p.jsonl"], dir.path());
     assert!(
         out.status.success(),
         "{}\n{}",
@@ -350,6 +359,8 @@ fn quantized_model_generates_reproducible_images() {
     for name in ["a.png", "b.png"] {
         let out = mixel(
             &[
+                "--model",
+                "turbo",
                 "--quantize",
                 "4",
                 "--prompt",
@@ -380,7 +391,16 @@ fn quantized_model_generates_reproducible_images() {
 #[ignore = "needs the ~33 GB Z-Image-Turbo weights and a GPU; run with --ignored"]
 fn img2img_matches_text_to_image_at_full_strength_and_follows_image_size() {
     let dir = tempfile::tempdir().unwrap();
-    let base = ["--prompt", "a red apple", "--seed", "5", "--num-steps", "2"];
+    let base = [
+        "--model",
+        "turbo",
+        "--prompt",
+        "a red apple",
+        "--seed",
+        "5",
+        "--num-steps",
+        "2",
+    ];
     // Text-to-image reference at 256x256.
     let out = mixel(
         &[
@@ -545,7 +565,10 @@ fn qwen_generates_and_edits() {
     );
 
     // Z-Image-Turbo refuses reference images before loading anything.
-    let out = mixel(&["--prompt", "x", "--ref-image", "a.png"], dir.path());
+    let out = mixel(
+        &["--model", "turbo", "--prompt", "x", "--ref-image", "a.png"],
+        dir.path(),
+    );
     assert!(!out.status.success());
     assert!(text(&out.stderr).contains("does not take reference images"));
     assert!(!text(&out.stdout).contains("Loading"));

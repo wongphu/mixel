@@ -6,11 +6,11 @@ of them also in 4-step variants:
 
 | `--model` | Model | Default steps | 1024×1024 image | Can do |
 |---|---|---:|---:|---|
-| `z-image-turbo` (default) | [Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | 9 | ~59 s | text-to-image, img2img, [LoRAs](#loras) |
+| `z-image-turbo` | [Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | 9 | ~59 s | text-to-image, img2img, [LoRAs](#loras) |
 | `qwen-image-2.1` | [Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1) | 40 | ~6 min | text-to-image, img2img, **editing with reference images** |
 | `qwen-image-2.1-fast` | Qwen-Image-2.1 + [4-step Fun-Acc LoRA](https://huggingface.co/alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs) | 4 (fixed) | ~38 s | the same, slightly softer fine detail |
 | `moss-image` | [MOSS-Image-SFT](https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT) | 50 | ~13 min | text-to-image, img2img, **[text in images, JSON layouts](#moss-image-text-in-images-and-layouts)** |
-| `moss-image-fast` | MOSS-Image-SFT + [4-step rapid-moss adapter](https://huggingface.co/darask0/MOSS-Image_4-step_adapter_lora) | 4 | ~28 s | text-to-image |
+| `moss-image-fast` (default) | MOSS-Image-SFT + [4-step rapid-moss adapter](https://huggingface.co/darask0/MOSS-Image_4-step_adapter_lora) | 4 | ~28 s | text-to-image |
 
 Times are medians from the [reference benchmark](benchmarks/) on an M3 Max (30-core GPU,
 96 GB), with the weights already in memory; an edit with a ~1024×1024 reference image takes
@@ -20,16 +20,17 @@ GB as Apple does (2^30 bytes). All three are ports: Z-Image of candle-transforme
 (`src/zimage/`), Qwen-Image-2.1 of the diffusers pipeline and transformers' Qwen3-VL
 (`src/qwen21/`), MOSS-Image of the pipeline bundled with its weights and transformers'
 Qwen3.5 (`src/moss/`). The CLI, JSONL batch mode and seeding match
-[`candy`](https://github.com/wongphu/candle-diffusion), the candle version, but Z-Image
+[`candy`](https://github.com/wongphu/candle-diffusion), the candle version (except the
+default model: mixel's is `moss-image-fast`, `--model turbo` gives candy's), but Z-Image
 sampling follows diffusers, so the same seed gives a slightly different image
 ([details](#z-image-sampling-follows-diffusers)).
 
 ```bash
 cargo install --path .
-mixel --prompt "A cute robot holding a candle" --seed 42
+mixel --prompt 'A shop window, a hand-painted sign reads "MIXEL BOOKS"' --seed 1
+mixel --model turbo --prompt "A cute robot holding a candle" --seed 42
 mixel --model qwen-image-2.1 --prompt "A capybara wearing a wizard hat, oil painting" --seed 1
 mixel --model qwen-fast --ref-image fox.png --prompt "Turn the fox into a gray wolf" --seed 1
-mixel --model moss-fast --prompt 'A shop window, a hand-painted sign reads "MIXEL BOOKS"' --seed 1
 ```
 
 - Or download a ready-made `mixel` for macOS 14 or later from
@@ -37,7 +38,7 @@ mixel --model moss-fast --prompt 'A shop window, a hand-painted sign reads "MIXE
 - The first run downloads the weights to `~/.cache/huggingface`: ~33 GB for Z-Image-Turbo
   (shared with `candy`), ~31 GB for Qwen-Image-2.1 (plus 0.35 GB for its 4-step adapter),
   ~25 GB for MOSS-Image-SFT (plus 1.2 GB for its 4-step adapter).
-- Without `--seed`, a random seed is used and added to the filename (`z_image_output-1234567.png`).
+- Without `--seed`, a random seed is used and added to the filename (`moss_image_output-1234567.png`).
 - Width/height must be multiples of 16 (Z-Image, MOSS-Image) or 32 (Qwen-Image).
   `--model-path <dir>` uses local weights (the 4-step adapters still come from the Hugging
   Face cache).
@@ -135,7 +136,7 @@ the small caption's text came out misspelled ("Silizon" for "Silicon").
 Start from an existing image instead of pure noise:
 
 ```bash
-mixel --init-image photo.jpg --prompt "A gray wolf sitting in fresh snow" --strength 0.75 --seed 7
+mixel --model turbo --init-image photo.jpg --prompt "A gray wolf sitting in fresh snow" --strength 0.75 --seed 7
 ```
 
 - Works with every model except `moss-image-fast`. `--strength` in (0, 1] is the fraction
@@ -233,8 +234,8 @@ Z-Image-Turbo image peaked at 36 GB in mixel 0.3, and a Qwen-Image-2.1 edit at 6
 ## LoRAs
 
 ```bash
-mixel --lora pixel_art.safetensors --prompt "Pixel art style. A red fox sitting in fresh snow"
-mixel --quantize 4 --lora style.safetensors:0.7 --lora detail.safetensors:0.5 --prompt "..."
+mixel --model turbo --lora pixel_art.safetensors --prompt "Pixel art style. A red fox sitting in fresh snow"
+mixel --model turbo --quantize 4 --lora style.safetensors:0.7 --lora detail.safetensors:0.5 --prompt "..."
 mixel --model qwen-fast --lora doodle_in_lora_qwen21.safetensors --ref-image scribbled.png \
       --prompt "<doodle> Turn the magenta scribble into a black top hat."
 ```
@@ -281,7 +282,7 @@ mixel = { git = "https://github.com/wongphu/mixel" }
 ```rust
 use mixel::{GenerateOptions, LoadOptions, Model, Parts, Pipeline, Progress, Quantize};
 
-let pipeline = Pipeline::load(&LoadOptions::default())?; // Z-Image-Turbo; load once, reuse
+let pipeline = Pipeline::load(&LoadOptions::default())?; // moss-image-fast; load once, reuse
 let opts = GenerateOptions { seed: 42, width: 768, ..GenerateOptions::new("a red fox in fresh snow") };
 let out = pipeline.generate_with(&opts, |p| {
     if let Progress::Step { step, total, .. } = p { eprintln!("step {step}/{total}") }
@@ -290,9 +291,15 @@ out.image.save("fox.png")?;          // image::DynamicImage (RGBA if Qwen output
 
 println!("{:?}", out.timings);       // text / init image / denoise / vae durations
 
-// img2img: set init_image and strength
+// img2img (any model but moss-image-fast): set init_image and strength
+let turbo = Pipeline::load(&LoadOptions { model: Model::ZImageTurbo, ..Default::default() })?;
 let photo = image::open("photo.jpg")?.to_rgb8();
-let variation = GenerateOptions { init_image: Some(photo.clone()), strength: 0.75, ..opts };
+let variation = GenerateOptions {
+    init_image: Some(photo),
+    strength: 0.75,
+    ..GenerateOptions::for_model(Model::ZImageTurbo, "a gray wolf in fresh snow")
+};
+turbo.generate(&variation)?.image.save("wolf.png")?;
 
 // Qwen-Image-2.1 with a reference image (Model::QwenImage21Fast for 4 steps)
 let qwen = Pipeline::load(&LoadOptions { model: Model::QwenImage21, ..Default::default() })?;
@@ -323,7 +330,7 @@ mixel --input prompts.jsonl --output-dir out
 ```json
 {"id": "fox", "prompt": "A red fox in fresh snow", "seed": 3}
 {"prompt": "A bowl of ramen, top-down", "output": "food/ramen.png"}
-{"prompt": "A watercolor sailboat at dawn", "width": 768, "height": 512, "num_steps": 6}
+{"prompt": "A watercolor sailboat at dawn", "width": 768, "height": 512, "num_steps": 3}
 ```
 
 Fields: `prompt` (required), `id`, `negative_prompt`, `width`, `height`, `num_steps`,

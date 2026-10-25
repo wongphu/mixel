@@ -1,10 +1,11 @@
 //! The `mixel` command: single images or JSONL batches on top of the
-//! [`mixel`] library. The CLI and batch behavior mirror `candy`.
+//! [`mixel`] library. The CLI and batch behavior mirror `candy`, except that
+//! the default model is moss-image-fast (candy's is Z-Image-Turbo).
 //!
 //! ```bash
 //! mixel --prompt "A beautiful landscape with mountains" --seed 42
 //! mixel --input prompts.jsonl --output-dir out
-//! mixel --init-image photo.jpg --strength 0.6 --prompt "a watercolor painting"
+//! mixel --model turbo --init-image photo.jpg --strength 0.6 --prompt "a watercolor painting"
 //! mixel --model qwen-image-2.1 --ref-image photo.jpg --prompt "Make it night"
 //! ```
 
@@ -83,8 +84,12 @@ const GUIDE: &str = "\
 USAGE GUIDE (for scripts and AI agents)
 
 Choosing a model:
-  z-image-turbo (default)  ~59 s for 1024x1024 on an M3 Max (30-core GPU).
-                           Use for text-to-image and img2img.
+  moss-image-fast          ~28 s for 1024x1024 on an M3 Max (30-core GPU),
+  (default; alias          4 steps. Text-to-image only; best at images with
+  moss-fast)               text in them (signs, posters, labels, in English
+                           or Chinese) and at JSON layout prompts.
+  z-image-turbo            ~59 s for 1024x1024 (9 steps). Use for img2img
+  (alias turbo)            and for Z-Image LoRAs.
   qwen-image-2.1-fast      ~38 s for 1024x1024, ~58 s for an edit (4 steps).
   (alias qwen-fast)        Use to edit existing images (--ref-image). Fine
                            detail and small text are a little softer than
@@ -92,9 +97,6 @@ Choosing a model:
   qwen-image-2.1           ~6 min for 1024x1024, ~8 min for an edit (40
                            steps). Use when the fast variant's detail is
                            not enough.
-  moss-image-fast          ~28 s for 1024x1024 (4 steps). Use for images
-  (alias moss-fast)        with text in them (signs, posters, labels, in
-                           English or Chinese) and for JSON layout prompts.
   moss-image (alias moss)  ~13 min for 1024x1024 (50 steps, each run twice
                            for guidance). Use when the fast variant's
                            detail is not enough, or for img2img.
@@ -108,12 +110,14 @@ Recipes:
     mixel --model qwen-image-2.1-fast --ref-image in.png \\
           --prompt \"make it night\" --seed 1 --output night.png
   Text in the image (quote the words exactly as they should appear):
-    mixel --model moss-fast --prompt 'a bakery window, a sign reads \"OPEN\"' \\
+    mixel --prompt 'a bakery window, a sign reads \"OPEN\"' \\
           --seed 1 --output sign.png
   Variation of an image (img2img; lower --strength = closer to it):
-    mixel --init-image in.png --strength 0.7 --prompt \"...\" --seed 1 --output v.png
+    mixel --model turbo --init-image in.png --strength 0.7 \\
+          --prompt \"...\" --seed 1 --output v.png
   Add a LoRA trained for the model (repeatable; FILE[:SCALE]):
-    mixel --lora style.safetensors:0.8 --prompt \"<its trigger> ...\" --seed 1 --output s.png
+    mixel --model turbo --lora style.safetensors:0.8 \\
+          --prompt \"<its trigger> ...\" --seed 1 --output s.png
   Many images (loads the model once; much faster than a loop):
     mixel --input jobs.jsonl --output-dir out --seed 1
 
@@ -245,8 +249,9 @@ struct Args {
     #[arg(long)]
     strength: Option<f64>,
 
-    /// Number of inference steps [default: 9 for z-image-turbo, 40 for
-    /// qwen-image-2.1, 50 for moss-image; qwen-image-2.1-fast always runs 4].
+    /// Number of inference steps [default: 4 for moss-image-fast, 9 for
+    /// z-image-turbo, 40 for qwen-image-2.1, 50 for moss-image;
+    /// qwen-image-2.1-fast always runs 4].
     #[arg(long)]
     num_steps: Option<usize>,
 
@@ -265,7 +270,7 @@ struct Args {
     seed: Option<u64>,
 
     /// Which model to use.
-    #[arg(long, value_enum, default_value = "z-image-turbo")]
+    #[arg(long, value_enum, default_value = Model::default().name())]
     model: ModelArg,
 
     /// Quantize the model's large layers to 8 or 4 bits as it loads, to fit
@@ -1100,10 +1105,14 @@ mod tests {
 
     #[test]
     fn single_job_uses_model_default_steps() {
-        assert_eq!(single_job(&args(&[])).unwrap().num_steps, 9);
+        assert_eq!(single_job(&args(&[])).unwrap().num_steps, 4);
         assert_eq!(
-            single_job(&args(&["--num-steps", "4"])).unwrap().num_steps,
-            4
+            single_job(&args(&["--model", "turbo"])).unwrap().num_steps,
+            9
+        );
+        assert_eq!(
+            single_job(&args(&["--num-steps", "2"])).unwrap().num_steps,
+            2
         );
     }
 
@@ -1121,6 +1130,8 @@ mod tests {
         let a = batch_args(
             &input,
             &[
+                "--model",
+                "turbo",
                 "--width",
                 "512",
                 "--height",
@@ -1282,7 +1293,11 @@ mod tests {
             dir.path(),
             "{\"prompt\": \"a\"}\n{\"prompt\": \"b\", \"init_image\": \"in.png\"}\n",
         );
-        let jobs = read_jobs(&input, &batch_args(&input, &["--strength", "0.5"])).unwrap();
+        let jobs = read_jobs(
+            &input,
+            &batch_args(&input, &["--model", "turbo", "--strength", "0.5"]),
+        )
+        .unwrap();
         assert_eq!((jobs[0].strength, jobs[1].strength), (1.0, 0.5));
     }
 
@@ -1496,6 +1511,8 @@ not json
         let dir = tempfile::tempdir().unwrap();
         let img = write_png(dir.path(), "in.png", 640, 480);
         let job = single_job(&args(&[
+            "--model",
+            "turbo",
             "--init-image",
             img.to_str().unwrap(),
             "--seed",
@@ -1530,7 +1547,8 @@ not json
 "#,
         );
         // Run from another directory: paths must resolve against the JSONL file.
-        let err = read_jobs(&input, &batch_args(&input, &[]))
+        let turbo = ["--model", "turbo"];
+        let err = read_jobs(&input, &batch_args(&input, &turbo))
             .unwrap_err()
             .to_string();
         assert!(err.starts_with("2 invalid line(s)"), "{err}");
@@ -1541,7 +1559,7 @@ not json
         let png = std::fs::read(dir.path().join("a.png")).unwrap();
         std::fs::write(dir.path().join("cut.png"), &png[..png.len() / 2]).unwrap();
         let cut = write_jsonl(dir.path(), r#"{"prompt": "a", "init_image": "cut.png"}"#);
-        let err = read_jobs(&cut, &batch_args(&cut, &[]))
+        let err = read_jobs(&cut, &batch_args(&cut, &turbo))
             .unwrap_err()
             .to_string();
         assert!(err.contains("line 1: reading init image"), "{err}");
@@ -1550,7 +1568,7 @@ not json
             dir.path(),
             r#"{"prompt": "a", "seed": 1, "init_image": "a.png", "strength": 0.3}"#,
         );
-        let jobs = read_jobs(&ok, &batch_args(&ok, &[])).unwrap();
+        let jobs = read_jobs(&ok, &batch_args(&ok, &turbo)).unwrap();
         assert_eq!(
             jobs[0].init_image.as_deref(),
             Some(dir.path().join("a.png").as_path())
@@ -1566,7 +1584,7 @@ not json
 
     #[test]
     fn model_flag_accepts_names_and_aliases() {
-        assert_eq!(args(&[]).model(), Model::ZImageTurbo);
+        assert_eq!(args(&[]).model(), Model::MossImageFast);
         assert_eq!(args(&["--model", "turbo"]).model(), Model::ZImageTurbo);
         assert_eq!(
             args(&["--model", "qwen-image-2.1"]).model(),
@@ -1599,7 +1617,7 @@ not json
         let job = single_job(&args(&["--model", "qwen-image-2.1", "--seed", "1"])).unwrap();
         assert_eq!((job.num_steps, job.guidance_scale), (40, 1.0));
         assert_eq!(job.output, PathBuf::from("qwen_image_output.png"));
-        let job = single_job(&args(&["--seed", "1"])).unwrap();
+        let job = single_job(&args(&["--model", "turbo", "--seed", "1"])).unwrap();
         assert_eq!((job.num_steps, job.guidance_scale), (9, 0.0));
         assert_eq!(job.output, PathBuf::from("z_image_output.png"));
         let job = single_job(&args(&["--model", "qwen-fast", "--seed", "1"])).unwrap();
@@ -1679,7 +1697,15 @@ not json
         .unwrap();
         assert_eq!((job.width, job.height), (512, 768));
 
-        let job = single_job(&args(&["--ref-image", s, "--seed", "1"])).unwrap();
+        let job = single_job(&args(&[
+            "--model",
+            "turbo",
+            "--ref-image",
+            s,
+            "--seed",
+            "1",
+        ]))
+        .unwrap();
         let err = job.validate(&mut HashSet::new()).unwrap_err().to_string();
         assert!(err.contains("does not take reference images"), "{err}");
     }

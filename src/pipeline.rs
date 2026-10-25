@@ -10,18 +10,18 @@ use mlx_rs::Array;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Hugging Face repo of Z-Image-Turbo, the default model.
+/// Hugging Face repo of Z-Image-Turbo.
 pub const DEFAULT_REPO: &str = "Tongyi-MAI/Z-Image-Turbo";
 /// Denoising steps Z-Image-Turbo is tuned for.
 pub const DEFAULT_STEPS: usize = 9;
 /// Z-Image-Turbo's size multiple (VAE 8x * patch size 2).
 pub const SIZE_ALIGN: usize = 16;
 
-/// A supported text-to-image model.
+/// A supported text-to-image model; the default is [`Model::MossImageFast`],
+/// as for the `mixel` command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Model {
     /// Z-Image-Turbo: fast (9 steps), text-to-image and img2img.
-    #[default]
     ZImageTurbo,
     /// Qwen-Image-2.1: slower (40 steps), text-to-image, img2img, and editing
     /// with reference images.
@@ -34,6 +34,7 @@ pub enum Model {
     MossImage,
     /// MOSS-Image-SFT with the 4-step rapid-moss adapter
     /// ([`crate::moss::fast`]): text-to-image ~25x faster.
+    #[default]
     MossImageFast,
 }
 
@@ -245,9 +246,10 @@ impl std::fmt::Debug for GenerateOptions {
 }
 
 impl GenerateOptions {
-    /// Z-Image-Turbo defaults: 1024x1024, 9 steps, seed 0.
+    /// The default model's defaults ([`Model::MossImageFast`]: 1024x1024, 4
+    /// steps, seed 0). Use [`GenerateOptions::for_model`] for another model.
     pub fn new(prompt: impl Into<String>) -> Self {
-        Self::for_model(Model::ZImageTurbo, prompt)
+        Self::for_model(Model::default(), prompt)
     }
 
     /// `model`'s defaults at 1024x1024, seed 0.
@@ -323,7 +325,8 @@ impl GenerateOptions {
             );
             anyhow::ensure!(
                 self.init_image.is_none(),
-                "{model} can't start from an init image (its sampler has no noise level to start at); use {}",
+                "{model} can't start from an init image (its sampler has no noise level to start at); use {} (fast) or {}",
+                Model::ZImageTurbo,
                 Model::MossImage
             );
         }
@@ -739,7 +742,7 @@ mod tests {
         GenerateOptions {
             width,
             height,
-            ..GenerateOptions::new("a cat")
+            ..GenerateOptions::for_model(Model::ZImageTurbo, "a cat")
         }
     }
 
@@ -826,14 +829,18 @@ mod tests {
     }
 
     #[test]
-    fn new_uses_turbo_defaults() {
+    fn new_uses_the_default_models_defaults() {
         let o = GenerateOptions::new("x");
         assert_eq!(
             (o.width, o.height, o.num_steps, o.seed),
-            (1024, 1024, DEFAULT_STEPS, 0)
+            (1024, 1024, crate::moss::fast::STEPS, 0)
         );
         assert!(o.negative_prompt.is_empty());
-        assert_eq!(o.guidance_scale, 0.0); // Turbo runs without guidance
+        assert_eq!(o.guidance_scale, 1.0); // the 4-step adapter runs without guidance
+        o.validate(Model::default()).unwrap();
+
+        let t = GenerateOptions::for_model(Model::ZImageTurbo, "x");
+        assert_eq!((t.num_steps, t.guidance_scale), (DEFAULT_STEPS, 0.0));
     }
 
     #[test]
@@ -889,12 +896,15 @@ mod tests {
     fn models_have_their_own_defaults_and_names() {
         let q = GenerateOptions::for_model(Model::QwenImage21, "x");
         assert_eq!((q.num_steps, q.guidance_scale), (40, 1.0));
-        assert_eq!(GenerateOptions::new("x").num_steps, 9);
+        assert_eq!(
+            GenerateOptions::for_model(Model::ZImageTurbo, "x").num_steps,
+            9
+        );
         for m in Model::ALL {
             assert_eq!(m.name().parse::<Model>().unwrap(), m);
         }
         assert!("sdxl".parse::<Model>().is_err());
-        assert_eq!(Model::default(), Model::ZImageTurbo);
+        assert_eq!(Model::default(), Model::MossImageFast);
     }
 
     #[test]

@@ -4,12 +4,12 @@
 #   scripts/release.sh 0.4.2               # build, test, package, commit, tag
 #   scripts/release.sh 0.4.2 --no-models   # skip what needs the model weights
 #
-# It bumps the version, builds for macOS 14 and up, runs the tests
-# (with --include-ignored, so with the real models, unless --no-models),
-# packages mixel and mlx.metallib into target/dist/, checks the tarball from a
-# fresh folder, then commits "Release <version>" and tags v<version>. It
-# publishes nothing: the commands to push and create the GitHub release are
-# printed at the end.
+# It bumps the version (unless Cargo.toml already has it), builds for macOS 14
+# and up, runs the tests (with --include-ignored, so with the real models,
+# unless --no-models), packages mixel and mlx.metallib into target/dist/,
+# checks the tarball from a fresh folder, then commits "Release <version>" (if
+# it bumped) and tags v<version>. It publishes nothing: the commands to push
+# and create the GitHub release are printed at the end.
 set -euo pipefail
 
 # MLX's minimum. Building for the build machine's macOS (MLX's default) makes
@@ -85,8 +85,9 @@ Keep mlx.metallib in the same folder as mixel: it holds MLX's GPU kernels.
   ./mixel --prompt "a red fox in fresh snow" --seed 1 --output fox.png
   ./mixel --quantize 4 --prompt "a red fox in fresh snow" --seed 1 --output fox.png
 
-The first run downloads the model weights (~33 GB) to ~/.cache/huggingface.
---quantize 8 or 4 needs less memory (5.4 GB for a 1024x1024 image at 4 bits);
+The default model is moss-image-fast; --model turbo picks Z-Image-Turbo.
+The first run downloads its weights (~26 GB) to ~/.cache/huggingface.
+--quantize 8 or 4 needs less memory (6.9 GB for a 1024x1024 image at 4 bits);
 on a 16 GB Mac, use --quantize 8 for z-image-turbo, 4 for the qwen models
 and 8 or 4 for the moss models.
 If macOS blocks the downloaded binary, run:
@@ -104,6 +105,7 @@ trap restore EXIT
 tar xzf "$DIST/$NAME.tar.gz" -C "$CHECK"
 [ "$("$CHECK/$NAME/mixel" --version)" = "mixel $VERSION" ] || fail "packaged mixel --version"
 if [ $MODELS -eq 1 ]; then
+  # The default model (moss-image-fast), as README.txt's commands run it.
   "$CHECK/$NAME/mixel" --quantize 4 --prompt "a red fox in fresh snow" --seed 1 \
     --width 256 --height 256 --num-steps 2 --output "$CHECK/fox.png" | tail -1
   [ -s "$CHECK/fox.png" ] || fail "the packaged mixel made no image"
@@ -112,7 +114,11 @@ restore
 trap - EXIT
 
 step "Commit and tag"
-git commit -q -m "Release $VERSION" Cargo.toml Cargo.lock
+if git diff --quiet Cargo.toml Cargo.lock; then
+  echo "Cargo.toml already had $VERSION: tagging HEAD"
+else
+  git commit -q -m "Release $VERSION" Cargo.toml Cargo.lock
+fi
 git tag -a "v$VERSION" -m "mixel $VERSION"
 git log --oneline -1
 
