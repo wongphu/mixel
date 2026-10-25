@@ -85,8 +85,9 @@ Keep mlx.metallib in the same folder as mixel: it holds MLX's GPU kernels.
   ./mixel --prompt "a red fox in fresh snow" --seed 1 --output fox.png
   ./mixel --quantize 4 --prompt "a red fox in fresh snow" --seed 1 --output fox.png
 
-The first run downloads the model weights (~33 GB) to ~/.cache/huggingface.
---quantize 8 or 4 needs less memory (5.4 GB for a 1024x1024 image at 4 bits);
+The default model is moss-image-fast; --model turbo picks Z-Image-Turbo.
+The first run downloads its weights (~26 GB) to ~/.cache/huggingface.
+--quantize 8 or 4 needs less memory (6.9 GB for a 1024x1024 image at 4 bits);
 on a 16 GB Mac, use --quantize 8 for z-image-turbo, 4 for the qwen models
 and 8 or 4 for the moss models.
 If macOS blocks the downloaded binary, run:
@@ -104,6 +105,7 @@ trap restore EXIT
 tar xzf "$DIST/$NAME.tar.gz" -C "$CHECK"
 [ "$("$CHECK/$NAME/mixel" --version)" = "mixel $VERSION" ] || fail "packaged mixel --version"
 if [ $MODELS -eq 1 ]; then
+  # The default model (moss-image-fast), as README.txt's commands run it.
   "$CHECK/$NAME/mixel" --quantize 4 --prompt "a red fox in fresh snow" --seed 1 \
     --width 256 --height 256 --num-steps 2 --output "$CHECK/fox.png" | tail -1
   [ -s "$CHECK/fox.png" ] || fail "the packaged mixel made no image"
